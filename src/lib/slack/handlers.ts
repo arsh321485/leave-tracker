@@ -12,7 +12,7 @@ import {
 import { leaveHomeBlocks, managerApprovalBlocks, welcomeBlocks } from "@/lib/slack/blocks";
 import { getSlackClient, openDmChannel, SLACK_CALLBACKS } from "@/lib/slack/client";
 import { logger } from "@/lib/logger";
-import { withIdempotency, hashPayload } from "@/lib/idempotency";
+import { hashPayload, withIdempotency } from "@/lib/idempotency";
 
 export async function resolveEmployeeBySlackUserId(slackUserId: string) {
   return prisma.employee.findUnique({
@@ -32,26 +32,22 @@ export async function postWelcomeToLeaveChannel() {
   });
 }
 
+/** Fast path — must finish within Slack's 3s window (no DB idempotency first). */
 export async function handleSlashLeave(payload: {
   user_id: string;
   trigger_id: string;
   channel_id: string;
-  response_url?: string;
 }) {
-  const key = hashPayload(["command", payload.trigger_id, payload.user_id]);
-  return withIdempotency(key, async () => {
-    const client = getSlackClient();
-    await client.views.open({
-      trigger_id: payload.trigger_id,
-      view: {
-        type: "modal",
-        callback_id: SLACK_CALLBACKS.LEAVE_HOME,
-        title: { type: "plain_text", text: "Leave Tracker" },
-        close: { type: "plain_text", text: "Close" },
-        blocks: leaveHomeBlocks(),
-      },
-    });
-    return { ok: true };
+  const client = getSlackClient();
+  await client.views.open({
+    trigger_id: payload.trigger_id,
+    view: {
+      type: "modal",
+      callback_id: SLACK_CALLBACKS.LEAVE_HOME,
+      title: { type: "plain_text", text: "Leave Tracker" },
+      close: { type: "plain_text", text: "Close" },
+      blocks: leaveHomeBlocks(),
+    },
   });
 }
 
@@ -59,7 +55,13 @@ async function openApplyLeaveModal(client: WebClient, triggerId: string) {
   const types = await prisma.leaveType.findMany({
     where: { isActive: true },
     orderBy: { name: "asc" },
+    take: 100,
   });
+
+  if (!types.length) {
+    throw new Error("No active leave types configured");
+  }
+
   await client.views.open({
     trigger_id: triggerId,
     view: {
@@ -77,7 +79,7 @@ async function openApplyLeaveModal(client: WebClient, triggerId: string) {
             type: "static_select",
             action_id: "leave_type_select",
             options: types.map((t) => ({
-              text: { type: "plain_text", text: t.name },
+              text: { type: "plain_text", text: t.name.slice(0, 75) },
               value: t.id,
             })),
           },
@@ -177,16 +179,74 @@ export async function notifyManagerOfLeave(requestId: string) {
   });
 }
 
-export async function handleBlockActions(payload: {
+type BlockPayload = {
   user: { id: string };
   trigger_id: string;
   actions: Array<{ action_id: string; value?: string }>;
   response_url?: string;
   channel?: { id: string };
   message?: { ts: string };
-}) {
+};
+
+/**
+ * Fast path for actions that must call views.open within 3 seconds.
+ * Skips idempotency DB round-trips before opening the modal.
+ */
+export async function handleModalActionFast(payload: BlockPayload) {
+  const action = payload.actions[0];
+  if (!action) return;
+
+  const client = getSlackClient();
+
+  if (action.action_id === "apply_leave") {
+    const employee = await resolveEmployeeBySlackUserId(payload.user.id);
+    if (!employee || employee.status !== "ACTIVE") {
+      await client.chat.postMessage({
+        channel: payload.user.id,
+        text: "Your Slack account is not mapped to an active employee. Contact HR.",
+      });
+      return;
+    }
+    await openApplyLeaveModal(client, payload.trigger_id);
+    return;
+  }
+
+  if (action.action_id === "reject_leave" && action.value) {
+    await client.views.open({
+      trigger_id: payload.trigger_id,
+      view: {
+        type: "modal",
+        callback_id: SLACK_CALLBACKS.REJECT_LEAVE_MODAL,
+        private_metadata: action.value,
+        title: { type: "plain_text", text: "Reject Leave" },
+        submit: { type: "plain_text", text: "Reject Leave" },
+        close: { type: "plain_text", text: "Cancel" },
+        blocks: [
+          {
+            type: "input",
+            block_id: "rejection_reason",
+            label: { type: "plain_text", text: "Reason for rejection" },
+            element: {
+              type: "plain_text_input",
+              action_id: "rejection_reason_input",
+              multiline: true,
+            },
+          },
+        ],
+      },
+    });
+  }
+}
+
+/** Slower actions — safe to run after acknowledging Slack (via after()). */
+export async function handleBlockActions(payload: BlockPayload) {
   const action = payload.actions[0];
   if (!action) return { ok: true };
+
+  // Modal opens are handled on the fast path
+  if (action.action_id === "apply_leave" || action.action_id === "reject_leave") {
+    return { ok: true };
+  }
 
   const key = hashPayload([
     "action",
@@ -199,22 +259,15 @@ export async function handleBlockActions(payload: {
     const client = getSlackClient();
     const employee = await resolveEmployeeBySlackUserId(payload.user.id);
 
-    if (action.action_id === "apply_leave") {
-      if (!employee || employee.status !== "ACTIVE") {
-        await client.chat.postEphemeral({
-          channel: payload.channel?.id || payload.user.id,
-          user: payload.user.id,
-          text: "Your Slack account is not mapped to an active employee. Contact HR.",
-        });
-        return { ok: false };
-      }
-      await openApplyLeaveModal(client, payload.trigger_id);
-      return { ok: true };
+    if (!employee || employee.status !== "ACTIVE") {
+      await client.chat.postMessage({
+        channel: payload.user.id,
+        text: "Your Slack account is not mapped to an active employee. Contact HR.",
+      });
+      return { ok: false };
     }
 
-    if (!employee) {
-      return { ok: false, error: "Employee not mapped" };
-    }
+    const dmOrChannel = payload.channel?.id || employee.slackUserId!;
 
     if (action.action_id === "my_balance") {
       const year = new Date().getFullYear();
@@ -228,9 +281,9 @@ export async function handleBlockActions(payload: {
         return `*${b.leaveType.name}*\nAllocated: ${b.allocated} | Used: ${b.used} | Pending: ${b.pending} | Remaining: ${rem}`;
       });
       await client.chat.postEphemeral({
-        channel: payload.channel?.id || employee.slackUserId!,
+        channel: dmOrChannel,
         user: payload.user.id,
-        text: `🏖️ MY LEAVE BALANCE\n\n${lines.join("\n\n")}`,
+        text: `🏖️ MY LEAVE BALANCE\n\n${lines.join("\n\n") || "No balances found."}`,
       });
       return { ok: true };
     }
@@ -247,7 +300,7 @@ export async function handleBlockActions(payload: {
         return `${formatDateRange(r.startDate, r.endDate)}\n${r.leaveType.name} | ${r.days} days | ${r.status} | ${mgr}`;
       });
       await client.chat.postEphemeral({
-        channel: payload.channel?.id || employee.slackUserId!,
+        channel: dmOrChannel,
         user: payload.user.id,
         text: `📋 My Leave History\n\n${lines.join("\n\n") || "No leave history."}`,
       });
@@ -264,7 +317,7 @@ export async function handleBlockActions(payload: {
         (h) => `${format(h.date, "dd MMM")}  ${h.name}${h.isOptional ? " (Optional)" : ""}`
       );
       await client.chat.postEphemeral({
-        channel: payload.channel?.id || employee.slackUserId!,
+        channel: dmOrChannel,
         user: payload.user.id,
         text: `🎉 UPCOMING HOLIDAYS\n\n${lines.join("\n") || "No upcoming holidays."}`,
       });
@@ -314,39 +367,11 @@ export async function handleBlockActions(payload: {
         }
       } catch (e) {
         const msg = e instanceof LeaveValidationError ? e.message : "Approval failed";
-        await client.chat.postEphemeral({
-          channel: payload.channel?.id || payload.user.id,
-          user: payload.user.id,
+        await client.chat.postMessage({
+          channel: payload.user.id,
           text: msg,
         });
       }
-      return { ok: true };
-    }
-
-    if (action.action_id === "reject_leave" && action.value) {
-      await client.views.open({
-        trigger_id: payload.trigger_id,
-        view: {
-          type: "modal",
-          callback_id: SLACK_CALLBACKS.REJECT_LEAVE_MODAL,
-          private_metadata: action.value,
-          title: { type: "plain_text", text: "Reject Leave" },
-          submit: { type: "plain_text", text: "Reject Leave" },
-          close: { type: "plain_text", text: "Cancel" },
-          blocks: [
-            {
-              type: "input",
-              block_id: "rejection_reason",
-              label: { type: "plain_text", text: "Reason for rejection" },
-              element: {
-                type: "plain_text_input",
-                action_id: "rejection_reason_input",
-                multiline: true,
-              },
-            },
-          ],
-        },
-      });
       return { ok: true };
     }
 
@@ -354,16 +379,28 @@ export async function handleBlockActions(payload: {
   });
 }
 
-export async function handleViewSubmission(payload: {
+type ViewPayload = {
   user: { id: string };
   view: {
     callback_id: string;
     private_metadata?: string;
     state: {
-      values: Record<string, Record<string, { selected_option?: { value: string }; selected_date?: string; value?: string }>>;
+      values: Record<
+        string,
+        Record<
+          string,
+          { selected_option?: { value: string }; selected_date?: string; value?: string }
+        >
+      >;
     };
   };
-}) {
+};
+
+/**
+ * Process modal submit in the background after acknowledging Slack.
+ * Errors are DMed to the user (cannot show in-modal errors after ack).
+ */
+export async function processViewSubmissionBackground(payload: ViewPayload) {
   const key = hashPayload([
     "view",
     payload.view.callback_id,
@@ -372,13 +409,17 @@ export async function handleViewSubmission(payload: {
     JSON.stringify(payload.view.state.values),
   ]);
 
-  return withIdempotency(key, async () => {
+  await withIdempotency(key, async () => {
+    const client = getSlackClient();
     const employee = await resolveEmployeeBySlackUserId(payload.user.id);
+
+    const dm = async (text: string) => {
+      await client.chat.postMessage({ channel: payload.user.id, text });
+    };
+
     if (!employee || employee.status !== "ACTIVE") {
-      return {
-        response_action: "errors",
-        errors: { reason: "Your Slack account is not mapped to an active employee." },
-      };
+      await dm("Your Slack account is not mapped to an active employee. Contact HR.");
+      return { ok: false };
     }
 
     if (payload.view.callback_id === SLACK_CALLBACKS.APPLY_LEAVE_MODAL) {
@@ -402,14 +443,15 @@ export async function handleViewSubmission(payload: {
           actorLabel: employee.name,
         });
         await notifyManagerOfLeave(request.id);
-        return { response_action: "clear" };
+        await dm(
+          `✅ Leave request submitted (${request.days} day(s)). Your manager will review it.`
+        );
       } catch (e) {
-        const msg = e instanceof LeaveValidationError ? e.message : "Could not create leave request.";
-        return {
-          response_action: "errors",
-          errors: { reason: msg },
-        };
+        const msg =
+          e instanceof LeaveValidationError ? e.message : "Could not create leave request.";
+        await dm(`❌ ${msg}`);
       }
+      return { ok: true };
     }
 
     if (payload.view.callback_id === SLACK_CALLBACKS.REJECT_LEAVE_MODAL) {
@@ -423,7 +465,6 @@ export async function handleViewSubmission(payload: {
           reason,
           actorLabel: employee.name,
         });
-        const client = getSlackClient();
         if (request.slackChannelId && request.slackMessageTs) {
           await client.chat.update({
             channel: request.slackChannelId,
@@ -446,16 +487,13 @@ export async function handleViewSubmission(payload: {
             text: `❌ LEAVE REJECTED\n\nYour leave request has been rejected.\n\nDate: ${formatDateRange(request.startDate, request.endDate)}\nReason: ${reason}\nRejected By: ${employee.name}`,
           });
         }
-        return { response_action: "clear" };
       } catch (e) {
         const msg = e instanceof LeaveValidationError ? e.message : "Rejection failed.";
-        return {
-          response_action: "errors",
-          errors: { rejection_reason: msg },
-        };
+        await dm(`❌ ${msg}`);
       }
+      return { ok: true };
     }
 
-    return { response_action: "clear" };
+    return { ok: true };
   });
 }

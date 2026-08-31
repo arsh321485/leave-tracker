@@ -4,6 +4,9 @@ import { handleSlashLeave } from "@/lib/slack/handlers";
 import { rateLimit } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
 
+export const runtime = "nodejs";
+export const maxDuration = 10;
+
 export async function POST(req: NextRequest) {
   const rl = rateLimit(`slack-commands:${req.headers.get("x-forwarded-for") || "local"}`, 60);
   if (!rl.ok) return NextResponse.json({ error: "rate limited" }, { status: 429 });
@@ -29,6 +32,7 @@ export async function POST(req: NextRequest) {
 
   if (command === "/leave" || command === "/leaves") {
     try {
+      // Open modal ASAP (Slack trigger_id expires in ~3 seconds)
       await handleSlashLeave({
         user_id: userId,
         trigger_id: triggerId,
@@ -39,7 +43,7 @@ export async function POST(req: NextRequest) {
       logger.error({ err: e, command }, "Slash command failed");
       return NextResponse.json({
         response_type: "ephemeral",
-        text: "Could not open Leave Tracker. Please try again.",
+        text: "Could not open Leave Tracker. Please try again in a moment.",
       });
     }
   }

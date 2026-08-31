@@ -1,8 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { verifySlackSignature } from "@/lib/slack/client";
-import { handleBlockActions, handleViewSubmission } from "@/lib/slack/handlers";
+import {
+  handleBlockActions,
+  handleModalActionFast,
+  processViewSubmissionBackground,
+} from "@/lib/slack/handlers";
 import { rateLimit } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
+
+export const runtime = "nodejs";
+export const maxDuration = 30;
 
 export async function POST(req: NextRequest) {
   const rl = rateLimit(`slack-interactions:${req.headers.get("x-forwarded-for") || "local"}`, 120);
@@ -26,16 +34,39 @@ export async function POST(req: NextRequest) {
 
   try {
     if (payload.type === "block_actions") {
-      await handleBlockActions(payload);
+      const actionId = payload.actions?.[0]?.action_id as string | undefined;
+
+      // views.open must happen within 3s of trigger_id — do it before responding
+      if (actionId === "apply_leave" || actionId === "reject_leave") {
+        try {
+          await handleModalActionFast(payload);
+        } catch (e) {
+          logger.error({ err: e, actionId }, "Fast modal action failed");
+        }
+        return new NextResponse("", { status: 200 });
+      }
+
+      // Ack immediately; finish balance/history/approve in background
+      after(async () => {
+        try {
+          await handleBlockActions(payload);
+        } catch (e) {
+          logger.error({ err: e }, "Background block action failed");
+        }
+      });
       return new NextResponse("", { status: 200 });
     }
+
     if (payload.type === "view_submission") {
-      const result = await handleViewSubmission(payload);
-      const body = result.result as Record<string, unknown>;
-      if (body?.response_action === "errors") {
-        return NextResponse.json(body);
-      }
-      return NextResponse.json(body?.response_action ? body : { response_action: "clear" });
+      // Ack within 3s, then create leave / reject in background (DM on success/error)
+      after(async () => {
+        try {
+          await processViewSubmissionBackground(payload);
+        } catch (e) {
+          logger.error({ err: e }, "Background view submission failed");
+        }
+      });
+      return NextResponse.json({ response_action: "clear" });
     }
   } catch (e) {
     logger.error({ err: e }, "Slack interaction error");
