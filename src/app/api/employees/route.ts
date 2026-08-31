@@ -1,21 +1,26 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Role } from "@prisma/client";
+import { Role, AuditAction, Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireSession, jsonError } from "@/lib/api";
 import { writeAuditLog } from "@/lib/audit";
-import { AuditAction } from "@prisma/client";
 
 const createSchema = z.object({
-  name: z.string().min(1),
-  email: z.string().email(),
+  name: z.string().min(1, "Name is required"),
+  email: z.string().email("Enter a valid email"),
   departmentId: z.string().optional().nullable(),
   designation: z.string().optional().nullable(),
   managerId: z.string().optional().nullable(),
   slackUserId: z.string().optional().nullable(),
   joiningDate: z.string().optional().nullable(),
-  status: z.enum(["ACTIVE", "INACTIVE"]).default("ACTIVE"),
+  status: z.enum(["ACTIVE", "INACTIVE"]).optional().default("ACTIVE"),
 });
+
+function emptyToNull(v?: string | null) {
+  if (v == null) return null;
+  const t = v.trim();
+  return t.length ? t : null;
+}
 
 export async function GET(req: NextRequest) {
   const { error } = await requireSession();
@@ -37,39 +42,73 @@ export async function POST(req: NextRequest) {
   const { user, error } = await requireSession([Role.SUPER_ADMIN, Role.HR_ADMIN]);
   if (error) return error;
 
-  const body = createSchema.parse(await req.json());
-  const email = body.email.toLowerCase();
-  const slackUserId = body.slackUserId || null;
+  let raw: unknown;
+  try {
+    raw = await req.json();
+  } catch {
+    return jsonError("Invalid JSON body");
+  }
+
+  const parsed = createSchema.safeParse(raw);
+  if (!parsed.success) {
+    const msg = parsed.error.issues.map((i) => i.message).join("; ");
+    return jsonError(msg || "Invalid form data");
+  }
+
+  const body = parsed.data;
+  const email = body.email.trim().toLowerCase();
+  const slackUserId = emptyToNull(body.slackUserId);
+  const departmentId = emptyToNull(body.departmentId);
+  const managerId = emptyToNull(body.managerId);
+  const designation = emptyToNull(body.designation);
+  const joiningRaw = emptyToNull(body.joiningDate);
+
+  let joiningDate: Date | null = null;
+  if (joiningRaw) {
+    joiningDate = new Date(joiningRaw);
+    if (Number.isNaN(joiningDate.getTime())) {
+      return jsonError("Joining date is invalid. Use YYYY-MM-DD.");
+    }
+  }
+
+  if (departmentId) {
+    const dept = await prisma.department.findUnique({ where: { id: departmentId } });
+    if (!dept) return jsonError("Selected department does not exist. Pick Department again.");
+  }
+
+  if (managerId) {
+    const manager = await prisma.employee.findUnique({ where: { id: managerId } });
+    if (!manager) {
+      return jsonError("Selected manager does not exist. Leave Manager as None or pick again.");
+    }
+  }
 
   const conflict = await prisma.employee.findFirst({
     where: {
-      OR: [
-        { email },
-        ...(slackUserId ? [{ slackUserId }] : []),
-      ],
+      OR: [{ email }, ...(slackUserId ? [{ slackUserId }] : [])],
     },
   });
   if (conflict) {
     const reason =
       conflict.email === email
-        ? `email ${email} already used by "${conflict.name}"`
-        : `Slack User ID already used by "${conflict.name}"`;
+        ? `email "${email}" is already used by "${conflict.name}"`
+        : `Slack User ID is already used by "${conflict.name}"`;
     return jsonError(
-      `Could not create employee: ${reason}. Open that employee and click Edit instead of Create.`
+      `Could not create employee: ${reason}. Find them in the directory and click Edit.`
     );
   }
 
   try {
     const employee = await prisma.employee.create({
       data: {
-        name: body.name,
+        name: body.name.trim(),
         email,
-        departmentId: body.departmentId || null,
-        designation: body.designation || null,
-        managerId: body.managerId || null,
+        departmentId,
+        designation,
+        managerId,
         slackUserId,
-        joiningDate: body.joiningDate ? new Date(body.joiningDate) : null,
-        status: body.status,
+        joiningDate,
+        status: body.status ?? "ACTIVE",
       },
       include: { department: true, manager: true },
     });
@@ -82,7 +121,23 @@ export async function POST(req: NextRequest) {
       newValue: { name: employee.name, email: employee.email },
     });
     return NextResponse.json(employee, { status: 201 });
-  } catch {
-    return jsonError("Could not create employee");
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError) {
+      if (e.code === "P2002") {
+        return jsonError(
+          "Could not create employee: email or Slack User ID already exists. Use Edit on the existing person."
+        );
+      }
+      if (e.code === "P2003") {
+        return jsonError(
+          "Could not create employee: invalid Department or Manager reference. Re-select them."
+        );
+      }
+      return jsonError(`Could not create employee (database ${e.code})`);
+    }
+    console.error("Create employee failed", e);
+    return jsonError(
+      e instanceof Error ? `Could not create employee: ${e.message}` : "Could not create employee"
+    );
   }
 }
