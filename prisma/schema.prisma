@@ -1,0 +1,266 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  HR_ADMIN
+  MANAGER
+  EMPLOYEE
+}
+
+enum EmployeeStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum LeaveRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum LeaveDuration {
+  FULL_DAY
+  HALF_DAY
+}
+
+enum HolidayType {
+  PUBLIC
+  COMPANY
+  FESTIVAL
+  OPTIONAL
+}
+
+enum HolidayStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum DepartmentStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum AuditAction {
+  LEAVE_CREATED
+  LEAVE_APPROVED
+  LEAVE_REJECTED
+  LEAVE_CANCELLED
+  BALANCE_UPDATED
+  HOLIDAY_CREATED
+  HOLIDAY_UPDATED
+  HOLIDAY_DELETED
+  POLICY_UPDATED
+  EMPLOYEE_UPDATED
+  LEAVE_TYPE_UPDATED
+  OPTIONAL_HOLIDAY_SELECTED
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  name         String
+  role         Role      @default(EMPLOYEE)
+  employeeId   String?   @unique
+  employee     Employee? @relation(fields: [employeeId], references: [id])
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  auditLogs LeaveAuditLog[] @relation("AuditActor")
+}
+
+model Department {
+  id        String           @id @default(cuid())
+  name      String           @unique
+  status    DepartmentStatus @default(ACTIVE)
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  employees Employee[]
+}
+
+model Employee {
+  id           String         @id @default(cuid())
+  name         String
+  email        String         @unique
+  departmentId String?
+  department   Department?    @relation(fields: [departmentId], references: [id])
+  designation  String?
+  managerId    String?
+  manager      Employee?      @relation("EmployeeManager", fields: [managerId], references: [id])
+  reports      Employee[]     @relation("EmployeeManager")
+  slackUserId  String?        @unique
+  slackName    String?
+  joiningDate  DateTime?
+  status       EmployeeStatus @default(ACTIVE)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  user                     User?
+  leaveBalances            LeaveBalance[]
+  leaveRequests            LeaveRequest[]
+  optionalHolidaySelections OptionalHolidaySelection[]
+  approvedRequests         LeaveRequest[] @relation("LeaveApprover")
+  rejectedRequests         LeaveRequest[] @relation("LeaveRejector")
+  holidaysCreated          Holiday[]      @relation("HolidayCreator")
+
+  @@index([managerId])
+  @@index([slackUserId])
+  @@index([status])
+  @@index([departmentId])
+}
+
+model LeaveType {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  policy   LeavePolicy?
+  balances LeaveBalance[]
+  requests LeaveRequest[]
+}
+
+model LeavePolicy {
+  id                      String   @id @default(cuid())
+  leaveTypeId             String   @unique
+  leaveType               LeaveType @relation(fields: [leaveTypeId], references: [id])
+  annualAllocation        Float    @default(12)
+  carryForwardEnabled     Boolean  @default(false)
+  carryForwardLimit       Float    @default(0)
+  maxConsecutiveDays      Int?
+  requiresManagerApproval Boolean  @default(true)
+  allowHalfDay            Boolean  @default(true)
+  allowDuringProbation    Boolean  @default(false)
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+}
+
+model LeaveBalance {
+  id           String    @id @default(cuid())
+  employeeId   String
+  employee     Employee  @relation(fields: [employeeId], references: [id])
+  leaveTypeId  String
+  leaveType    LeaveType @relation(fields: [leaveTypeId], references: [id])
+  year         Int
+  allocated    Float     @default(0)
+  used         Float     @default(0)
+  pending      Float     @default(0)
+  carryForward Float     @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@unique([employeeId, leaveTypeId, year])
+  @@index([employeeId])
+  @@index([year])
+}
+
+model LeaveRequest {
+  id              String             @id @default(cuid())
+  employeeId      String
+  employee        Employee           @relation(fields: [employeeId], references: [id])
+  leaveTypeId     String
+  leaveType       LeaveType          @relation(fields: [leaveTypeId], references: [id])
+  startDate       DateTime           @db.Date
+  endDate         DateTime           @db.Date
+  duration        LeaveDuration      @default(FULL_DAY)
+  days            Float
+  reason          String
+  status          LeaveRequestStatus @default(PENDING)
+  approvedById    String?
+  approvedBy      Employee?          @relation("LeaveApprover", fields: [approvedById], references: [id])
+  approvedAt      DateTime?
+  rejectedById    String?
+  rejectedBy      Employee?          @relation("LeaveRejector", fields: [rejectedById], references: [id])
+  rejectedAt      DateTime?
+  rejectionReason String?
+  slackMessageTs  String?
+  slackChannelId  String?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  @@index([employeeId])
+  @@index([status])
+  @@index([startDate, endDate])
+  @@index([leaveTypeId])
+}
+
+model Holiday {
+  id          String        @id @default(cuid())
+  name        String
+  date        DateTime      @db.Date
+  type        HolidayType
+  isOptional  Boolean       @default(false)
+  description String?
+  maxRequests Int?
+  status      HolidayStatus @default(ACTIVE)
+  createdById String?
+  createdBy   Employee?     @relation("HolidayCreator", fields: [createdById], references: [id])
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  selections OptionalHolidaySelection[]
+
+  @@index([date])
+  @@index([status])
+  @@index([type])
+}
+
+model OptionalHolidaySelection {
+  id         String   @id @default(cuid())
+  employeeId String
+  employee   Employee @relation(fields: [employeeId], references: [id])
+  holidayId  String
+  holiday    Holiday  @relation(fields: [holidayId], references: [id])
+  createdAt  DateTime @default(now())
+
+  @@unique([employeeId, holidayId])
+  @@index([holidayId])
+}
+
+model LeaveAuditLog {
+  id         String      @id @default(cuid())
+  actorId    String?
+  actor      User?       @relation("AuditActor", fields: [actorId], references: [id])
+  actorLabel String?
+  action     AuditAction
+  objectType String
+  objectId   String?
+  oldValue   Json?
+  newValue   Json?
+  metadata   Json?
+  createdAt  DateTime    @default(now())
+
+  @@index([action])
+  @@index([objectType, objectId])
+  @@index([createdAt])
+}
+
+model SlackIdempotency {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  response  Json?
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+model SlackInstallation {
+  id          String   @id @default(cuid())
+  teamId      String   @unique
+  teamName    String?
+  botUserId   String?
+  installedAt DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
