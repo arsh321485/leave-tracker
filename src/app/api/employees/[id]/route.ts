@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Role, EmployeeStatus, AuditAction } from "@prisma/client";
+import { Role, EmployeeStatus, AuditAction, Prisma } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireSession, jsonError } from "@/lib/api";
@@ -67,11 +67,15 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
       newValue: { name: employee.name, managerId: employee.managerId },
     });
     return NextResponse.json(employee);
-  } catch {
-    return jsonError("Update failed (email or Slack ID conflict)");
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+      return jsonError("Update failed: email or Slack User ID already used by another employee");
+    }
+    return jsonError("Update failed");
   }
 }
 
+/** Hard-delete employee and related leave data from the database. */
 export async function DELETE(_req: NextRequest, ctx: Ctx) {
   const { user, error } = await requireSession([Role.SUPER_ADMIN, Role.HR_ADMIN]);
   if (error) return error;
@@ -79,11 +83,31 @@ export async function DELETE(_req: NextRequest, ctx: Ctx) {
   const existing = await prisma.employee.findUnique({ where: { id } });
   if (!existing) return jsonError("Not found", 404);
 
-  // Soft-delete: keep history (leave requests/balances) but mark inactive
-  const employee = await prisma.employee.update({
-    where: { id },
-    data: { status: EmployeeStatus.INACTIVE, slackUserId: null, slackName: null },
-    include: { department: true, manager: true },
+  await prisma.$transaction(async (tx) => {
+    await tx.user.updateMany({
+      where: { employeeId: id },
+      data: { employeeId: null },
+    });
+    await tx.optionalHolidaySelection.deleteMany({ where: { employeeId: id } });
+    await tx.leaveBalance.deleteMany({ where: { employeeId: id } });
+    await tx.leaveRequest.updateMany({
+      where: { approvedById: id },
+      data: { approvedById: null },
+    });
+    await tx.leaveRequest.updateMany({
+      where: { rejectedById: id },
+      data: { rejectedById: null },
+    });
+    await tx.leaveRequest.deleteMany({ where: { employeeId: id } });
+    await tx.holiday.updateMany({
+      where: { createdById: id },
+      data: { createdById: null },
+    });
+    await tx.employee.updateMany({
+      where: { managerId: id },
+      data: { managerId: null },
+    });
+    await tx.employee.delete({ where: { id } });
   });
 
   await writeAuditLog({
@@ -92,10 +116,10 @@ export async function DELETE(_req: NextRequest, ctx: Ctx) {
     action: AuditAction.EMPLOYEE_UPDATED,
     objectType: "Employee",
     objectId: id,
-    oldValue: { status: existing.status, slackUserId: existing.slackUserId },
-    newValue: { status: "INACTIVE", slackUserId: null },
-    metadata: { softDeleted: true },
+    oldValue: { name: existing.name, email: existing.email },
+    newValue: { deleted: true },
+    metadata: { hardDeleted: true },
   });
 
-  return NextResponse.json(employee);
+  return NextResponse.json({ ok: true, deletedId: id });
 }

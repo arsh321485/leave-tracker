@@ -132,17 +132,37 @@ export default function EmployeesPage() {
   async function removeEmployee(emp: Employee) {
     if (
       !confirm(
-        `Deactivate ${emp.name}? Leave history is kept. They will be marked INACTIVE and unmapped from Slack.`
+        `Permanently DELETE ${emp.name} from the database?\n\nTheir leave requests and balances will also be removed. This cannot be undone.`
       )
     ) {
       return;
     }
     const res = await fetch(`/api/employees/${emp.id}`, { method: "DELETE" });
-    const data = await res.json();
-    setMessage(res.ok ? `${emp.name} deactivated` : data.error || "Delete failed");
+    const data = await res.json().catch(() => ({}));
+    setMessage(res.ok ? `${emp.name} deleted from database` : data.error || "Delete failed");
     if (res.ok) {
       setSelectedIds((prev) => prev.filter((id) => id !== emp.id));
       if (editingId === emp.id) cancelEdit();
+      load();
+    }
+  }
+
+  async function resetAllEmployees() {
+    if (
+      !confirm(
+        "Clear ALL employees and leave data from the database?\n\nLogin accounts stay. You will need to add employees again (or run seed)."
+      )
+    ) {
+      return;
+    }
+    if (!confirm("Are you sure? This cannot be undone.")) return;
+    const res = await fetch("/api/admin/reset-employees", { method: "POST" });
+    const data = await res.json();
+    setMessage(res.ok ? data.message : data.error || "Reset failed");
+    if (res.ok) {
+      setSelectedIds([]);
+      setSyncRows([]);
+      cancelEdit();
       load();
     }
   }
@@ -212,7 +232,12 @@ export default function EmployeesPage() {
             Manage employees, assign managers in bulk, and link Slack accounts
           </p>
         </div>
-        <Button onClick={syncSlack}>Sync Slack Users</Button>
+        <div className="flex flex-wrap gap-2">
+          <Button onClick={syncSlack}>Sync Slack Users</Button>
+          <Button variant="destructive" onClick={resetAllEmployees}>
+            Clear all employees
+          </Button>
+        </div>
       </div>
       {message && <p className="text-sm text-slate-600">{message}</p>}
 
@@ -325,9 +350,9 @@ export default function EmployeesPage() {
         </CardHeader>
         <CardContent className="space-y-3">
           <p className="text-sm text-slate-500">
-            Example: you are Arsh (HR/manager). Select your 7 team members below, choose{" "}
-            <strong>Arsh</strong> as manager, then click Apply. This sets who approves their
-            leave — it is different from Slack account linking.
+            Example: you are Arsh. Tick your 7 team members in the directory, choose{" "}
+            <strong>Arsh</strong> as manager, click Apply. That only sets who{" "}
+            <strong>approves leave</strong>.
           </p>
           <div className="flex flex-wrap items-end gap-3">
             <div>
@@ -427,9 +452,13 @@ export default function EmployeesPage() {
                       <Button size="sm" variant="outline" onClick={() => startEdit(e)}>
                         Edit
                       </Button>
-                      {e.status === "ACTIVE" && (
+                      {e.status === "ACTIVE" ? (
                         <Button size="sm" variant="destructive" onClick={() => removeEmployee(e)}>
                           Delete
+                        </Button>
+                      ) : (
+                        <Button size="sm" variant="destructive" onClick={() => removeEmployee(e)}>
+                          Delete forever
                         </Button>
                       )}
                     </div>
@@ -448,10 +477,15 @@ export default function EmployeesPage() {
           </CardHeader>
           <CardContent className="space-y-3 overflow-x-auto">
             <p className="text-sm text-slate-500">
-              Link each Slack user to <strong>that same person&apos;s</strong> employee record
-              (e.g. Slack &quot;dikshika&quot; → employee Dikshika). Do <strong>not</strong> map
-              everyone to Arsh here — Arsh as their manager is set in the directory / bulk manager
-              section above.
+              <strong>Why Slack linking is still required:</strong> when someone types{" "}
+              <code>/leave</code> in Slack, the app only knows their Slack User ID. Linking
+              connects that ID to the employee record (and then to their manager). Without it,
+              Slack cannot tell who they are.
+              <br />
+              <br />
+              Link <strong>same person only</strong> (Slack &quot;dikshika&quot; → employee
+              Dikshika). Do <strong>not</strong> link everyone to Arsh here — use{" "}
+              <strong>Assign manager</strong> above for that.
             </p>
             <table className="w-full min-w-[700px] text-left text-sm">
               <thead className="border-b text-slate-500">

@@ -38,15 +38,36 @@ export async function POST(req: NextRequest) {
   if (error) return error;
 
   const body = createSchema.parse(await req.json());
+  const email = body.email.toLowerCase();
+  const slackUserId = body.slackUserId || null;
+
+  const conflict = await prisma.employee.findFirst({
+    where: {
+      OR: [
+        { email },
+        ...(slackUserId ? [{ slackUserId }] : []),
+      ],
+    },
+  });
+  if (conflict) {
+    const reason =
+      conflict.email === email
+        ? `email ${email} already used by "${conflict.name}"`
+        : `Slack User ID already used by "${conflict.name}"`;
+    return jsonError(
+      `Could not create employee: ${reason}. Open that employee and click Edit instead of Create.`
+    );
+  }
+
   try {
     const employee = await prisma.employee.create({
       data: {
         name: body.name,
-        email: body.email.toLowerCase(),
+        email,
         departmentId: body.departmentId || null,
         designation: body.designation || null,
         managerId: body.managerId || null,
-        slackUserId: body.slackUserId || null,
+        slackUserId,
         joiningDate: body.joiningDate ? new Date(body.joiningDate) : null,
         status: body.status,
       },
@@ -62,6 +83,6 @@ export async function POST(req: NextRequest) {
     });
     return NextResponse.json(employee, { status: 201 });
   } catch {
-    return jsonError("Could not create employee (email or Slack ID may already exist)");
+    return jsonError("Could not create employee");
   }
 }
