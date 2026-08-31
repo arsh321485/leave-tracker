@@ -27,7 +27,7 @@ export async function POST(req: NextRequest) {
   const triggerId = params.get("trigger_id") || "";
   const channelId = params.get("channel_id") || "";
 
-  if (command === "/leave") {
+  if (command === "/leave" || command === "/leaves") {
     try {
       await handleSlashLeave({
         user_id: userId,
@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
       });
       return new NextResponse("", { status: 200 });
     } catch (e) {
-      logger.error({ err: e }, "Slash command failed");
+      logger.error({ err: e, command }, "Slash command failed");
       return NextResponse.json({
         response_type: "ephemeral",
         text: "Could not open Leave Tracker. Please try again.",
@@ -46,6 +46,6 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({
     response_type: "ephemeral",
-    text: "Unknown command",
+    text: `Unknown command: ${command || "(empty)"}. Use /leave or /leaves.`,
   });
 }
