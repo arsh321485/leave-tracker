@@ -2,6 +2,13 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { getToken } from "next-auth/jwt";
 
+function sessionCookieName(req: NextRequest) {
+  // Auth.js v5 cookie names (HTTPS on Vercel uses the __Secure- prefix)
+  return req.nextUrl.protocol === "https:"
+    ? "__Secure-authjs.session-token"
+    : "authjs.session-token";
+}
+
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
   if (
@@ -14,9 +21,12 @@ export async function middleware(req: NextRequest) {
   }
 
   if (pathname.startsWith("/leave") || pathname.startsWith("/api/")) {
+    const secret = process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET;
     const token = await getToken({
       req,
-      secret: process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET,
+      secret,
+      secureCookie: req.nextUrl.protocol === "https:",
+      cookieName: sessionCookieName(req),
     });
     if (!token) {
       if (pathname.startsWith("/api/")) {

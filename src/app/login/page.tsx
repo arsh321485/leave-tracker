@@ -26,7 +26,13 @@ export default function LoginPage() {
     });
     setLoading(false);
     if (res?.error) {
-      setError("Invalid email or password");
+      if (res.error === "Configuration") {
+        setError(
+          "Server auth is misconfigured. Set AUTH_SECRET and NEXTAUTH_URL on Vercel, then redeploy."
+        );
+      } else {
+        setError(`Login failed (${res.error}). Check email/password or Vercel DATABASE_URL.`);
+      }
       return;
     }
     router.push(search.get("callbackUrl") || "/leave/dashboard");
@@ -47,6 +53,7 @@ export default function LoginPage() {
               <Input
                 id="email"
                 type="email"
+                autoComplete="username"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
@@ -57,6 +64,7 @@ export default function LoginPage() {
               <Input
                 id="password"
                 type="password"
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
