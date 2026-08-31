@@ -68,10 +68,8 @@ export async function validateLeaveRequest(input: {
     throw new LeaveValidationError("Start date must be on or before end date.");
   }
 
+  // Half / full day is a duration option on every leave type (not a separate type).
   if (input.duration === LeaveDuration.HALF_DAY) {
-    if (!leaveType.policy?.allowHalfDay) {
-      throw new LeaveValidationError("Half-day leave is not allowed for this leave type.");
-    }
     if (start.toISOString().slice(0, 10) !== end.toISOString().slice(0, 10)) {
       throw new LeaveValidationError("Half-day leave must be for a single day.");
     }

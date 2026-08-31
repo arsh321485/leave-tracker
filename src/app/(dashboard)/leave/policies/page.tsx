@@ -12,7 +12,6 @@ type Policy = {
   carryForwardLimit: number;
   maxConsecutiveDays: number | null;
   requiresManagerApproval: boolean;
-  allowHalfDay: boolean;
   allowDuringProbation: boolean;
   leaveType: { name: string; code: string };
 };
@@ -37,7 +36,7 @@ export default function PoliciesPage() {
         carryForwardLimit: p.carryForwardLimit,
         maxConsecutiveDays: p.maxConsecutiveDays,
         requiresManagerApproval: p.requiresManagerApproval,
-        allowHalfDay: p.allowHalfDay,
+        allowHalfDay: true,
         allowDuringProbation: p.allowDuringProbation,
       }),
     });
@@ -107,14 +106,6 @@ export default function PoliciesPage() {
                   onChange={(e) => update(p.id, { requiresManagerApproval: e.target.checked })}
                 />
                 Requires manager approval
-              </label>
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={p.allowHalfDay}
-                  onChange={(e) => update(p.id, { allowHalfDay: e.target.checked })}
-                />
-                Allow half day
               </label>
               <label className="flex items-center gap-2 text-sm">
                 <input

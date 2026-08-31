@@ -17,15 +17,14 @@ async function main() {
     create: { name: "Human Resources" },
   });
 
+  // Half/full day is a duration on each leave type, not separate leave types.
   const leaveTypes = [
     { code: "CASUAL", name: "Casual Leave", allocation: 12 },
     { code: "SICK", name: "Sick Leave", allocation: 12 },
     { code: "ANNUAL", name: "Annual Leave", allocation: 15 },
     { code: "EARNED", name: "Earned Leave", allocation: 12 },
     { code: "UNPAID", name: "Unpaid Leave", allocation: 30 },
-    { code: "COMP_OFF", name: "Comp Off", allocation: 5 },
     { code: "OPTIONAL", name: "Optional Holiday", allocation: 2 },
-    { code: "HALF_DAY", name: "Half Day", allocation: 12 },
   ];
 
   for (const lt of leaveTypes) {
@@ -53,6 +52,12 @@ async function main() {
       },
     });
   }
+
+  // Legacy leave types: Comp Off / Half Day are no longer used as types.
+  await prisma.leaveType.updateMany({
+    where: { code: { in: ["COMP_OFF", "HALF_DAY"] } },
+    data: { isActive: false },
+  });
 
   const manager = await prisma.employee.upsert({
     where: { email: "amit@secureitlab.com" },

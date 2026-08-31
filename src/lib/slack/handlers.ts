@@ -90,7 +90,10 @@ export async function handleSlashLeave(payload: {
 
 async function buildApplyLeaveView() {
   const types = await prisma.leaveType.findMany({
-    where: { isActive: true },
+    where: {
+      isActive: true,
+      code: { notIn: ["COMP_OFF", "HALF_DAY"] },
+    },
     orderBy: { name: "asc" },
     take: 100,
   });
