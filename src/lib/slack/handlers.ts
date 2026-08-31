@@ -32,7 +32,44 @@ export async function postWelcomeToLeaveChannel() {
   });
 }
 
-/** Fast path — must finish within Slack's 3s window (no DB idempotency first). */
+async function dmUser(client: WebClient, slackUserId: string, text: string) {
+  const channelId = await openDmChannel(client, slackUserId);
+  if (channelId) {
+    await client.chat.postMessage({ channel: channelId, text });
+  } else {
+    await client.chat.postMessage({ channel: slackUserId, text });
+  }
+}
+
+/** From an existing modal use push; otherwise open. */
+async function openOrPushView(
+  client: WebClient,
+  triggerId: string,
+  view: Record<string, unknown>,
+  fromModal: boolean
+) {
+  if (fromModal) {
+    await client.views.push({ trigger_id: triggerId, view: view as never });
+  } else {
+    await client.views.open({ trigger_id: triggerId, view: view as never });
+  }
+}
+
+function infoModal(title: string, text: string) {
+  const truncated = text.length > 2900 ? `${text.slice(0, 2900)}…` : text;
+  return {
+    type: "modal",
+    title: { type: "plain_text", text: title.slice(0, 24) },
+    close: { type: "plain_text", text: "Close" },
+    blocks: [
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: truncated || "_No data_" },
+      },
+    ],
+  };
+}
+
 export async function handleSlashLeave(payload: {
   user_id: string;
   trigger_id: string;
@@ -51,7 +88,7 @@ export async function handleSlashLeave(payload: {
   });
 }
 
-async function openApplyLeaveModal(client: WebClient, triggerId: string) {
+async function buildApplyLeaveView() {
   const types = await prisma.leaveType.findMany({
     where: { isActive: true },
     orderBy: { name: "asc" },
@@ -59,73 +96,70 @@ async function openApplyLeaveModal(client: WebClient, triggerId: string) {
   });
 
   if (!types.length) {
-    throw new Error("No active leave types configured");
+    throw new Error("No active leave types configured. Ask HR to add leave types.");
   }
 
-  await client.views.open({
-    trigger_id: triggerId,
-    view: {
-      type: "modal",
-      callback_id: SLACK_CALLBACKS.APPLY_LEAVE_MODAL,
-      title: { type: "plain_text", text: "Apply Leave" },
-      submit: { type: "plain_text", text: "Submit" },
-      close: { type: "plain_text", text: "Cancel" },
-      blocks: [
-        {
-          type: "input",
-          block_id: "leave_type",
-          label: { type: "plain_text", text: "Leave Type" },
-          element: {
-            type: "static_select",
-            action_id: "leave_type_select",
-            options: types.map((t) => ({
-              text: { type: "plain_text", text: t.name.slice(0, 75) },
-              value: t.id,
-            })),
+  return {
+    type: "modal",
+    callback_id: SLACK_CALLBACKS.APPLY_LEAVE_MODAL,
+    title: { type: "plain_text", text: "Apply Leave" },
+    submit: { type: "plain_text", text: "Submit" },
+    close: { type: "plain_text", text: "Cancel" },
+    blocks: [
+      {
+        type: "input",
+        block_id: "leave_type",
+        label: { type: "plain_text", text: "Leave Type" },
+        element: {
+          type: "static_select",
+          action_id: "leave_type_select",
+          options: types.map((t) => ({
+            text: { type: "plain_text", text: t.name.slice(0, 75) },
+            value: t.id,
+          })),
+        },
+      },
+      {
+        type: "input",
+        block_id: "from_date",
+        label: { type: "plain_text", text: "From Date" },
+        element: { type: "datepicker", action_id: "from_date" },
+      },
+      {
+        type: "input",
+        block_id: "to_date",
+        label: { type: "plain_text", text: "To Date" },
+        element: { type: "datepicker", action_id: "to_date" },
+      },
+      {
+        type: "input",
+        block_id: "duration",
+        label: { type: "plain_text", text: "Leave Duration" },
+        element: {
+          type: "static_select",
+          action_id: "duration_select",
+          initial_option: {
+            text: { type: "plain_text", text: "Full Day" },
+            value: "FULL_DAY",
           },
+          options: [
+            { text: { type: "plain_text", text: "Full Day" }, value: "FULL_DAY" },
+            { text: { type: "plain_text", text: "Half Day" }, value: "HALF_DAY" },
+          ],
         },
-        {
-          type: "input",
-          block_id: "from_date",
-          label: { type: "plain_text", text: "From Date" },
-          element: { type: "datepicker", action_id: "from_date" },
+      },
+      {
+        type: "input",
+        block_id: "reason",
+        label: { type: "plain_text", text: "Reason" },
+        element: {
+          type: "plain_text_input",
+          action_id: "reason_input",
+          multiline: true,
         },
-        {
-          type: "input",
-          block_id: "to_date",
-          label: { type: "plain_text", text: "To Date" },
-          element: { type: "datepicker", action_id: "to_date" },
-        },
-        {
-          type: "input",
-          block_id: "duration",
-          label: { type: "plain_text", text: "Leave Duration" },
-          element: {
-            type: "static_select",
-            action_id: "duration_select",
-            initial_option: {
-              text: { type: "plain_text", text: "Full Day" },
-              value: "FULL_DAY",
-            },
-            options: [
-              { text: { type: "plain_text", text: "Full Day" }, value: "FULL_DAY" },
-              { text: { type: "plain_text", text: "Half Day" }, value: "HALF_DAY" },
-            ],
-          },
-        },
-        {
-          type: "input",
-          block_id: "reason",
-          label: { type: "plain_text", text: "Reason" },
-          element: {
-            type: "plain_text_input",
-            action_id: "reason_input",
-            multiline: true,
-          },
-        },
-      ],
-    },
-  });
+      },
+    ],
+  };
 }
 
 export async function notifyManagerOfLeave(requestId: string) {
@@ -186,35 +220,96 @@ type BlockPayload = {
   response_url?: string;
   channel?: { id: string };
   message?: { ts: string };
+  /** Present when the button was clicked inside a modal */
+  view?: { id: string; type?: string; callback_id?: string };
 };
 
 /**
- * Fast path for actions that must call views.open within 3 seconds.
- * Skips idempotency DB round-trips before opening the modal.
+ * Handles menu buttons quickly (within Slack's 3s limit).
+ * Buttons inside the Leave Tracker modal must use views.push, not views.open.
  */
 export async function handleModalActionFast(payload: BlockPayload) {
   const action = payload.actions[0];
   if (!action) return;
 
   const client = getSlackClient();
+  const fromModal = Boolean(payload.view);
+
+  const employee = await resolveEmployeeBySlackUserId(payload.user.id);
+  if (!employee || employee.status !== "ACTIVE") {
+    await dmUser(
+      client,
+      payload.user.id,
+      "Your Slack account is not mapped to an active employee. Contact HR."
+    );
+    if (fromModal) {
+      await openOrPushView(
+        client,
+        payload.trigger_id,
+        infoModal("Not mapped", "Your Slack account is not mapped to an active employee. Contact HR."),
+        true
+      );
+    }
+    return;
+  }
 
   if (action.action_id === "apply_leave") {
-    const employee = await resolveEmployeeBySlackUserId(payload.user.id);
-    if (!employee || employee.status !== "ACTIVE") {
-      await client.chat.postMessage({
-        channel: payload.user.id,
-        text: "Your Slack account is not mapped to an active employee. Contact HR.",
-      });
-      return;
-    }
-    await openApplyLeaveModal(client, payload.trigger_id);
+    const view = await buildApplyLeaveView();
+    await openOrPushView(client, payload.trigger_id, view, fromModal);
+    return;
+  }
+
+  if (action.action_id === "my_balance") {
+    const year = new Date().getFullYear();
+    const balances = await prisma.leaveBalance.findMany({
+      where: { employeeId: employee.id, year },
+      include: { leaveType: true },
+      orderBy: { leaveType: { name: "asc" } },
+    });
+    const lines = balances.map((b) => {
+      const rem = remainingBalance(b);
+      return `*${b.leaveType.name}*\nAllocated: ${b.allocated} | Used: ${b.used} | Pending: ${b.pending} | Remaining: ${rem}`;
+    });
+    const text = `🏖️ *MY LEAVE BALANCE*\n\n${lines.join("\n\n") || "No balances found."}`;
+    await openOrPushView(client, payload.trigger_id, infoModal("My Balance", text), fromModal);
+    return;
+  }
+
+  if (action.action_id === "my_history") {
+    const history = await prisma.leaveRequest.findMany({
+      where: { employeeId: employee.id },
+      include: { leaveType: true, approvedBy: true, rejectedBy: true },
+      orderBy: { createdAt: "desc" },
+      take: 15,
+    });
+    const lines = history.map((r) => {
+      const mgr = r.approvedBy?.name || r.rejectedBy?.name || "-";
+      return `*${formatDateRange(r.startDate, r.endDate)}*\n${r.leaveType.name} · ${r.days} days · ${r.status} · ${mgr}`;
+    });
+    const text = `📋 *My Leave History*\n\n${lines.join("\n\n") || "No leave history."}`;
+    await openOrPushView(client, payload.trigger_id, infoModal("Leave History", text), fromModal);
+    return;
+  }
+
+  if (action.action_id === "upcoming_holidays") {
+    const holidays = await prisma.holiday.findMany({
+      where: { status: "ACTIVE", date: { gte: new Date() } },
+      orderBy: { date: "asc" },
+      take: 20,
+    });
+    const lines = holidays.map(
+      (h) => `*${format(h.date, "dd MMM")}*  ${h.name}${h.isOptional ? " _(Optional)_" : ""}`
+    );
+    const text = `🎉 *UPCOMING HOLIDAYS*\n\n${lines.join("\n") || "No upcoming holidays."}`;
+    await openOrPushView(client, payload.trigger_id, infoModal("Holidays", text), fromModal);
     return;
   }
 
   if (action.action_id === "reject_leave" && action.value) {
-    await client.views.open({
-      trigger_id: payload.trigger_id,
-      view: {
+    await openOrPushView(
+      client,
+      payload.trigger_id,
+      {
         type: "modal",
         callback_id: SLACK_CALLBACKS.REJECT_LEAVE_MODAL,
         private_metadata: action.value,
@@ -234,17 +329,24 @@ export async function handleModalActionFast(payload: BlockPayload) {
           },
         ],
       },
-    });
+      fromModal
+    );
   }
 }
 
-/** Slower actions — safe to run after acknowledging Slack (via after()). */
+/** Approve and other non-modal actions after acknowledging Slack. */
 export async function handleBlockActions(payload: BlockPayload) {
   const action = payload.actions[0];
   if (!action) return { ok: true };
 
-  // Modal opens are handled on the fast path
-  if (action.action_id === "apply_leave" || action.action_id === "reject_leave") {
+  // Menu / modal actions handled on the fast path
+  if (
+    action.action_id === "apply_leave" ||
+    action.action_id === "reject_leave" ||
+    action.action_id === "my_balance" ||
+    action.action_id === "my_history" ||
+    action.action_id === "upcoming_holidays"
+  ) {
     return { ok: true };
   }
 
@@ -260,68 +362,12 @@ export async function handleBlockActions(payload: BlockPayload) {
     const employee = await resolveEmployeeBySlackUserId(payload.user.id);
 
     if (!employee || employee.status !== "ACTIVE") {
-      await client.chat.postMessage({
-        channel: payload.user.id,
-        text: "Your Slack account is not mapped to an active employee. Contact HR.",
-      });
-      return { ok: false };
-    }
-
-    const dmOrChannel = payload.channel?.id || employee.slackUserId!;
-
-    if (action.action_id === "my_balance") {
-      const year = new Date().getFullYear();
-      const balances = await prisma.leaveBalance.findMany({
-        where: { employeeId: employee.id, year },
-        include: { leaveType: true },
-        orderBy: { leaveType: { name: "asc" } },
-      });
-      const lines = balances.map((b) => {
-        const rem = remainingBalance(b);
-        return `*${b.leaveType.name}*\nAllocated: ${b.allocated} | Used: ${b.used} | Pending: ${b.pending} | Remaining: ${rem}`;
-      });
-      await client.chat.postEphemeral({
-        channel: dmOrChannel,
-        user: payload.user.id,
-        text: `🏖️ MY LEAVE BALANCE\n\n${lines.join("\n\n") || "No balances found."}`,
-      });
-      return { ok: true };
-    }
-
-    if (action.action_id === "my_history") {
-      const history = await prisma.leaveRequest.findMany({
-        where: { employeeId: employee.id },
-        include: { leaveType: true, approvedBy: true, rejectedBy: true },
-        orderBy: { createdAt: "desc" },
-        take: 15,
-      });
-      const lines = history.map((r) => {
-        const mgr = r.approvedBy?.name || r.rejectedBy?.name || "-";
-        return `${formatDateRange(r.startDate, r.endDate)}\n${r.leaveType.name} | ${r.days} days | ${r.status} | ${mgr}`;
-      });
-      await client.chat.postEphemeral({
-        channel: dmOrChannel,
-        user: payload.user.id,
-        text: `📋 My Leave History\n\n${lines.join("\n\n") || "No leave history."}`,
-      });
-      return { ok: true };
-    }
-
-    if (action.action_id === "upcoming_holidays") {
-      const holidays = await prisma.holiday.findMany({
-        where: { status: "ACTIVE", date: { gte: new Date() } },
-        orderBy: { date: "asc" },
-        take: 20,
-      });
-      const lines = holidays.map(
-        (h) => `${format(h.date, "dd MMM")}  ${h.name}${h.isOptional ? " (Optional)" : ""}`
+      await dmUser(
+        client,
+        payload.user.id,
+        "Your Slack account is not mapped to an active employee. Contact HR."
       );
-      await client.chat.postEphemeral({
-        channel: dmOrChannel,
-        user: payload.user.id,
-        text: `🎉 UPCOMING HOLIDAYS\n\n${lines.join("\n") || "No upcoming holidays."}`,
-      });
-      return { ok: true };
+      return { ok: false };
     }
 
     if (action.action_id === "approve_leave" && action.value) {
@@ -360,17 +406,15 @@ export async function handleBlockActions(payload: BlockPayload) {
         }
 
         if (request.employee.slackUserId) {
-          await client.chat.postMessage({
-            channel: request.employee.slackUserId,
-            text: `✅ LEAVE APPROVED\n\nYour leave request has been approved.\n\nLeave: ${request.leaveType.name}\nDate: ${formatDateRange(request.startDate, request.endDate)}\nDays: ${request.days}\nApproved By: ${employee.name}\nRemaining Balance: ${bal ? remainingBalance(bal) : "n/a"} days`,
-          });
+          await dmUser(
+            client,
+            request.employee.slackUserId,
+            `✅ LEAVE APPROVED\n\nYour leave request has been approved.\n\nLeave: ${request.leaveType.name}\nDate: ${formatDateRange(request.startDate, request.endDate)}\nDays: ${request.days}\nApproved By: ${employee.name}\nRemaining Balance: ${bal ? remainingBalance(bal) : "n/a"} days`
+          );
         }
       } catch (e) {
         const msg = e instanceof LeaveValidationError ? e.message : "Approval failed";
-        await client.chat.postMessage({
-          channel: payload.user.id,
-          text: msg,
-        });
+        await dmUser(client, payload.user.id, msg);
       }
       return { ok: true };
     }
@@ -396,10 +440,6 @@ type ViewPayload = {
   };
 };
 
-/**
- * Process modal submit in the background after acknowledging Slack.
- * Errors are DMed to the user (cannot show in-modal errors after ack).
- */
 export async function processViewSubmissionBackground(payload: ViewPayload) {
   const key = hashPayload([
     "view",
@@ -413,9 +453,7 @@ export async function processViewSubmissionBackground(payload: ViewPayload) {
     const client = getSlackClient();
     const employee = await resolveEmployeeBySlackUserId(payload.user.id);
 
-    const dm = async (text: string) => {
-      await client.chat.postMessage({ channel: payload.user.id, text });
-    };
+    const dm = async (text: string) => dmUser(client, payload.user.id, text);
 
     if (!employee || employee.status !== "ACTIVE") {
       await dm("Your Slack account is not mapped to an active employee. Contact HR.");
@@ -482,10 +520,11 @@ export async function processViewSubmissionBackground(payload: ViewPayload) {
           });
         }
         if (request.employee.slackUserId) {
-          await client.chat.postMessage({
-            channel: request.employee.slackUserId,
-            text: `❌ LEAVE REJECTED\n\nYour leave request has been rejected.\n\nDate: ${formatDateRange(request.startDate, request.endDate)}\nReason: ${reason}\nRejected By: ${employee.name}`,
-          });
+          await dmUser(
+            client,
+            request.employee.slackUserId,
+            `❌ LEAVE REJECTED\n\nYour leave request has been rejected.\n\nDate: ${formatDateRange(request.startDate, request.endDate)}\nReason: ${reason}\nRejected By: ${employee.name}`
+          );
         }
       } catch (e) {
         const msg = e instanceof LeaveValidationError ? e.message : "Rejection failed.";

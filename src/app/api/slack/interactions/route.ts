@@ -12,6 +12,14 @@ import { logger } from "@/lib/logger";
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
+const FAST_ACTIONS = new Set([
+  "apply_leave",
+  "reject_leave",
+  "my_balance",
+  "my_history",
+  "upcoming_holidays",
+]);
+
 export async function POST(req: NextRequest) {
   const rl = rateLimit(`slack-interactions:${req.headers.get("x-forwarded-for") || "local"}`, 120);
   if (!rl.ok) return NextResponse.json({ error: "rate limited" }, { status: 429 });
@@ -36,17 +44,26 @@ export async function POST(req: NextRequest) {
     if (payload.type === "block_actions") {
       const actionId = payload.actions?.[0]?.action_id as string | undefined;
 
-      // views.open must happen within 3s of trigger_id — do it before responding
-      if (actionId === "apply_leave" || actionId === "reject_leave") {
+      // Menu buttons + reject modal must use trigger_id within 3s
+      if (actionId && FAST_ACTIONS.has(actionId)) {
         try {
           await handleModalActionFast(payload);
         } catch (e) {
           logger.error({ err: e, actionId }, "Fast modal action failed");
+          try {
+            const { getSlackClient } = await import("@/lib/slack/client");
+            const client = getSlackClient();
+            await client.chat.postMessage({
+              channel: payload.user.id,
+              text: `Leave Tracker error: ${e instanceof Error ? e.message : "Please try again."}`,
+            });
+          } catch {
+            /* ignore */
+          }
         }
         return new NextResponse("", { status: 200 });
       }
 
-      // Ack immediately; finish balance/history/approve in background
       after(async () => {
         try {
           await handleBlockActions(payload);
@@ -58,7 +75,6 @@ export async function POST(req: NextRequest) {
     }
 
     if (payload.type === "view_submission") {
-      // Ack within 3s, then create leave / reject in background (DM on success/error)
       after(async () => {
         try {
           await processViewSubmissionBackground(payload);
