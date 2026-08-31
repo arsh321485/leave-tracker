@@ -71,3 +71,31 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
     return jsonError("Update failed (email or Slack ID conflict)");
   }
 }
+
+export async function DELETE(_req: NextRequest, ctx: Ctx) {
+  const { user, error } = await requireSession([Role.SUPER_ADMIN, Role.HR_ADMIN]);
+  if (error) return error;
+  const { id } = await ctx.params;
+  const existing = await prisma.employee.findUnique({ where: { id } });
+  if (!existing) return jsonError("Not found", 404);
+
+  // Soft-delete: keep history (leave requests/balances) but mark inactive
+  const employee = await prisma.employee.update({
+    where: { id },
+    data: { status: EmployeeStatus.INACTIVE, slackUserId: null, slackName: null },
+    include: { department: true, manager: true },
+  });
+
+  await writeAuditLog({
+    actorId: user.id,
+    actorLabel: user.name,
+    action: AuditAction.EMPLOYEE_UPDATED,
+    objectType: "Employee",
+    objectId: id,
+    oldValue: { status: existing.status, slackUserId: existing.slackUserId },
+    newValue: { status: "INACTIVE", slackUserId: null },
+    metadata: { softDeleted: true },
+  });
+
+  return NextResponse.json(employee);
+}
