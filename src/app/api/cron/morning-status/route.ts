@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { sendMorningStatusDigest } from "@/lib/slack/morning-status";
+import { sendMorningStatusDigestIfScheduled } from "@/lib/slack/morning-status";
 import { jsonError } from "@/lib/api";
 
 export async function GET(req: NextRequest) {
@@ -8,7 +8,10 @@ export async function GET(req: NextRequest) {
     return jsonError("Unauthorized", 401);
   }
 
-  const result = await sendMorningStatusDigest();
+  const result = await sendMorningStatusDigestIfScheduled();
+  if ("skipped" in result && result.skipped) {
+    return NextResponse.json(result);
+  }
   if (!result.ok) return jsonError(result.reason || "Failed", 400);
   return NextResponse.json(result);
 }

@@ -5,13 +5,29 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input, Label } from "@/components/ui/input";
 
+const HOUR_OPTIONS = Array.from({ length: 24 }, (_, h) => ({
+  value: h,
+  label:
+    h === 0
+      ? "12:00 AM"
+      : h < 12
+        ? `${h}:00 AM`
+        : h === 12
+          ? "12:00 PM"
+          : `${h - 12}:00 PM`,
+}));
+
 export default function SettingsPage() {
   const [morningStatusSlackId, setMorningStatusSlackId] = useState("");
+  const [morningStatusHourIst, setMorningStatusHourIst] = useState(6);
   const [message, setMessage] = useState("");
 
   async function load() {
     const data = await fetch("/api/settings").then((r) => r.json());
     setMorningStatusSlackId(data.morningStatusSlackId || "");
+    setMorningStatusHourIst(
+      typeof data.morningStatusHourIst === "number" ? data.morningStatusHourIst : 6
+    );
   }
 
   useEffect(() => {
@@ -23,7 +39,7 @@ export default function SettingsPage() {
     const res = await fetch("/api/settings", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ morningStatusSlackId }),
+      body: JSON.stringify({ morningStatusSlackId, morningStatusHourIst }),
     });
     const data = await res.json();
     setMessage(res.ok ? "Settings saved" : data.error || "Save failed");
@@ -48,23 +64,37 @@ export default function SettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Morning team status DM</CardTitle>
+          <CardTitle>Morning team status</CardTitle>
         </CardHeader>
         <CardContent>
           <form onSubmit={onSave} className="max-w-xl space-y-4">
+            <div>
+              <Label>Send daily at (India time)</Label>
+              <select
+                className="mt-1 h-10 w-full rounded-md border border-slate-200 px-3 text-sm"
+                value={morningStatusHourIst}
+                onChange={(e) => setMorningStatusHourIst(Number(e.target.value))}
+              >
+                {HOUR_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label} IST
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-slate-500">
+                Default is <strong>6:00 AM IST</strong>. Change here anytime — no code deploy needed.
+              </p>
+            </div>
             <div>
               <Label>Slack User or Channel ID</Label>
               <Input
                 value={morningStatusSlackId}
                 onChange={(e) => setMorningStatusSlackId(e.target.value)}
-                placeholder="U01234567 or C01234567"
+                placeholder="C01234567 (channel recommended)"
               />
               <p className="mt-1 text-xs text-slate-500">
-                <strong>Morning digest only</strong> — this can be a channel (C…) or a user (U…).
-                Leave approve/reject messages always go to the <strong>employee&apos;s personal Slack DM</strong> (their Slack User ID on the Employees page).
-              </p>
-              <p className="mt-1 text-xs text-amber-700">
-                Manager not getting leave requests? Edit the manager on Employees → set their Slack User ID (U…). The manager must have used /leave at least once.
+                Paste your <strong>channel ID</strong> (starts with C) — e.g. your #team-status channel.
+                Invite the bot: <code>/invite @Leave Tracker</code>
               </p>
             </div>
             <div className="flex flex-wrap gap-2">

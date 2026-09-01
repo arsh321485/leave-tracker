@@ -6,20 +6,35 @@ import {
   getAppSetting,
   setAppSetting,
   SETTING_MORNING_STATUS_SLACK_ID,
+  SETTING_MORNING_STATUS_HOUR_IST,
+  getMorningStatusHourIst,
   sendMorningStatusDigest,
 } from "@/lib/slack/morning-status";
 import { logger } from "@/lib/logger";
 
 const schema = z.object({
   morningStatusSlackId: z.string().optional(),
+  morningStatusHourIst: z.number().int().min(0).max(23).optional(),
 });
+
+function formatHourIst(h: number) {
+  if (h === 0) return "12 AM";
+  if (h < 12) return `${h} AM`;
+  if (h === 12) return "12 PM";
+  return `${h - 12} PM`;
+}
 
 export async function GET() {
   const { error } = await requireSession([Role.SUPER_ADMIN, Role.HR_ADMIN]);
   if (error) return error;
 
   const morningStatusSlackId = await getAppSetting(SETTING_MORNING_STATUS_SLACK_ID);
-  return NextResponse.json({ morningStatusSlackId: morningStatusSlackId || "" });
+  const morningStatusHourIst = await getMorningStatusHourIst();
+  return NextResponse.json({
+    morningStatusSlackId: morningStatusSlackId || "",
+    morningStatusHourIst,
+    morningStatusTimeLabel: formatHourIst(morningStatusHourIst),
+  });
 }
 
 export async function PUT(req: NextRequest) {
@@ -31,9 +46,17 @@ export async function PUT(req: NextRequest) {
     if (body.morningStatusSlackId !== undefined) {
       await setAppSetting(SETTING_MORNING_STATUS_SLACK_ID, body.morningStatusSlackId.trim());
     }
+    if (body.morningStatusHourIst !== undefined) {
+      await setAppSetting(SETTING_MORNING_STATUS_HOUR_IST, String(body.morningStatusHourIst));
+    }
 
     const morningStatusSlackId = await getAppSetting(SETTING_MORNING_STATUS_SLACK_ID);
-    return NextResponse.json({ morningStatusSlackId: morningStatusSlackId || "" });
+    const morningStatusHourIst = await getMorningStatusHourIst();
+    return NextResponse.json({
+      morningStatusSlackId: morningStatusSlackId || "",
+      morningStatusHourIst,
+      morningStatusTimeLabel: formatHourIst(morningStatusHourIst),
+    });
   } catch (e) {
     logger.error({ err: e }, "Save settings failed");
     return jsonError(e instanceof Error ? e.message : "Save failed", 500);
