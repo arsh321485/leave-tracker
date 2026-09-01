@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireSession, jsonError } from "@/lib/api";
 import { writeAuditLog } from "@/lib/audit";
+import { MENSTRUATION_LEAVE_CODE } from "@/lib/leave/constants";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -17,6 +18,7 @@ const updateSchema = z.object({
   slackName: z.string().nullable().optional(),
   joiningDate: z.string().nullable().optional(),
   status: z.enum(["ACTIVE", "INACTIVE"]).optional(),
+  menstruationLeaveEligible: z.boolean().optional(),
 });
 
 export async function GET(_req: NextRequest, ctx: Ctx) {
@@ -25,7 +27,11 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
   const { id } = await ctx.params;
   const employee = await prisma.employee.findUnique({
     where: { id },
-    include: { department: true, manager: true },
+    include: {
+      department: true,
+      manager: true,
+      leaveEligibility: { include: { leaveType: true } },
+    },
   });
   if (!employee) return jsonError("Not found", 404);
   return NextResponse.json(employee);
@@ -66,7 +72,37 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
       oldValue: { name: existing.name, managerId: existing.managerId },
       newValue: { name: employee.name, managerId: employee.managerId },
     });
-    return NextResponse.json(employee);
+
+    if (typeof body.menstruationLeaveEligible === "boolean") {
+      const mType = await prisma.leaveType.findUnique({
+        where: { code: MENSTRUATION_LEAVE_CODE },
+      });
+      if (mType) {
+        if (body.menstruationLeaveEligible) {
+          await prisma.employeeLeaveEligibility.upsert({
+            where: {
+              employeeId_leaveTypeId: { employeeId: id, leaveTypeId: mType.id },
+            },
+            update: {},
+            create: { employeeId: id, leaveTypeId: mType.id },
+          });
+        } else {
+          await prisma.employeeLeaveEligibility.deleteMany({
+            where: { employeeId: id, leaveTypeId: mType.id },
+          });
+        }
+      }
+    }
+
+    const refreshed = await prisma.employee.findUnique({
+      where: { id },
+      include: {
+        department: true,
+        manager: true,
+        leaveEligibility: { include: { leaveType: true } },
+      },
+    });
+    return NextResponse.json(refreshed);
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
       return jsonError("Update failed: email or Slack User ID already used by another employee");
@@ -89,6 +125,7 @@ export async function DELETE(_req: NextRequest, ctx: Ctx) {
       data: { employeeId: null },
     });
     await tx.optionalHolidaySelection.deleteMany({ where: { employeeId: id } });
+    await tx.employeeLeaveEligibility.deleteMany({ where: { employeeId: id } });
     await tx.leaveBalance.deleteMany({ where: { employeeId: id } });
     await tx.leaveRequest.updateMany({
       where: { approvedById: id },

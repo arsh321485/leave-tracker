@@ -19,6 +19,7 @@ type Employee = {
   department?: { id: string; name: string } | null;
   manager?: { id: string; name: string } | null;
   joiningDate?: string | null;
+  menstruationLeaveEligible?: boolean;
 };
 
 type Dept = { id: string; name: string };
@@ -40,6 +41,7 @@ const emptyForm = {
   slackUserId: "",
   joiningDate: "",
   status: "ACTIVE",
+  menstruationLeaveEligible: false,
 };
 
 export default function EmployeesPage() {
@@ -93,6 +95,7 @@ export default function EmployeesPage() {
       slackUserId: form.slackUserId || null,
       joiningDate: form.joiningDate || null,
       status: form.status as "ACTIVE" | "INACTIVE",
+      ...(editingId ? { menstruationLeaveEligible: form.menstruationLeaveEligible } : {}),
     };
 
     const res = await fetch(editingId ? `/api/employees/${editingId}` : "/api/employees", {
@@ -120,6 +123,7 @@ export default function EmployeesPage() {
       slackUserId: emp.slackUserId || "",
       joiningDate: emp.joiningDate ? emp.joiningDate.slice(0, 10) : "",
       status: emp.status || "ACTIVE",
+      menstruationLeaveEligible: emp.menstruationLeaveEligible ?? false,
     });
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -331,6 +335,18 @@ export default function EmployeesPage() {
                   <option value="INACTIVE">INACTIVE</option>
                 </select>
               </div>
+            )}
+            {editingId && (
+              <label className="flex items-center gap-2 text-sm md:col-span-2">
+                <input
+                  type="checkbox"
+                  checked={form.menstruationLeaveEligible}
+                  onChange={(e) =>
+                    setForm({ ...form, menstruationLeaveEligible: e.target.checked })
+                  }
+                />
+                Eligible for Menstruation Leave (1 day per month, does not carry forward)
+              </label>
             )}
             <div className="flex items-end gap-2">
               <Button type="submit">{editingId ? "Save changes" : "Create"}</Button>

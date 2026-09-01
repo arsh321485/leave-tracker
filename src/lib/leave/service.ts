@@ -95,6 +95,53 @@ export async function validateLeaveRequest(input: {
     );
   }
 
+  if (leaveType.policy?.requiresEligibility) {
+    const eligible = await prisma.employeeLeaveEligibility.findUnique({
+      where: {
+        employeeId_leaveTypeId: {
+          employeeId: input.employeeId,
+          leaveTypeId: input.leaveTypeId,
+        },
+      },
+    });
+    if (!eligible) {
+      throw new LeaveValidationError(`You are not eligible for ${leaveType.name}.`);
+    }
+  }
+
+  if (leaveType.policy?.monthlyQuota != null) {
+    if (days > leaveType.policy.monthlyQuota) {
+      throw new LeaveValidationError(
+        `Maximum ${leaveType.policy.monthlyQuota} day(s) per month for ${leaveType.name}.`
+      );
+    }
+    const monthStart = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
+    const monthEnd = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0));
+    const usedThisMonth = await prisma.leaveRequest.count({
+      where: {
+        employeeId: input.employeeId,
+        leaveTypeId: input.leaveTypeId,
+        status: { in: [LeaveRequestStatus.PENDING, LeaveRequestStatus.APPROVED] },
+        startDate: { gte: monthStart, lte: monthEnd },
+        ...(input.excludeRequestId ? { id: { not: input.excludeRequestId } } : {}),
+      },
+    });
+    if (usedThisMonth > 0) {
+      throw new LeaveValidationError(
+        `Only one ${leaveType.name.toLowerCase()} request is allowed per calendar month. Unused days do not carry forward.`
+      );
+    }
+
+    return {
+      employee,
+      leaveType,
+      days,
+      balance: null,
+      year: start.getUTCFullYear(),
+      monthly: true,
+    };
+  }
+
   const conflicting = await prisma.leaveRequest.findMany({
     where: {
       employeeId: input.employeeId,
@@ -144,7 +191,7 @@ export async function validateLeaveRequest(input: {
     );
   }
 
-  return { employee, leaveType, days, balance, year };
+  return { employee, leaveType, days, balance, year, monthly: false };
 }
 
 export async function createLeaveRequest(input: {
@@ -177,10 +224,24 @@ export async function createLeaveRequest(input: {
       },
     });
 
-    await tx.leaveBalance.update({
-      where: { id: validated.balance.id },
-      data: { pending: { increment: validated.days } },
-    });
+    if (validated.balance) {
+      await tx.leaveBalance.update({
+        where: { id: validated.balance.id },
+        data: { pending: { increment: validated.days } },
+      });
+
+      await writeAuditLog(
+        {
+          actorId: input.actorId,
+          actorLabel: input.actorLabel,
+          action: AuditAction.BALANCE_UPDATED,
+          objectType: "LeaveBalance",
+          objectId: validated.balance.id,
+          metadata: { pendingIncrement: validated.days },
+        },
+        tx
+      );
+    }
 
     await writeAuditLog(
       {
@@ -194,18 +255,6 @@ export async function createLeaveRequest(input: {
           days: created.days,
           leaveTypeId: created.leaveTypeId,
         },
-      },
-      tx
-    );
-
-    await writeAuditLog(
-      {
-        actorId: input.actorId,
-        actorLabel: input.actorLabel,
-        action: AuditAction.BALANCE_UPDATED,
-        objectType: "LeaveBalance",
-        objectId: validated.balance.id,
-        metadata: { pendingIncrement: validated.days },
       },
       tx
     );
@@ -243,17 +292,38 @@ export async function approveLeaveRequest(input: {
       throw new LeaveValidationError("You are not authorized to approve this request.");
     }
 
+    const leaveTypeWithPolicy = await tx.leaveType.findUnique({
+      where: { id: request.leaveTypeId },
+      include: { policy: true },
+    });
+    const isMonthly = leaveTypeWithPolicy?.policy?.monthlyQuota != null;
+
     const year = request.startDate.getUTCFullYear();
-    const balance = await tx.leaveBalance.findUnique({
-      where: {
-        employeeId_leaveTypeId_year: {
+    let balance = isMonthly
+      ? null
+      : await tx.leaveBalance.findUnique({
+          where: {
+            employeeId_leaveTypeId_year: {
+              employeeId: request.employeeId,
+              leaveTypeId: request.leaveTypeId,
+              year,
+            },
+          },
+        });
+
+    if (!isMonthly && !balance) {
+      balance = await tx.leaveBalance.create({
+        data: {
           employeeId: request.employeeId,
           leaveTypeId: request.leaveTypeId,
           year,
+          allocated: leaveTypeWithPolicy?.policy?.annualAllocation ?? 0,
+          used: 0,
+          pending: request.days,
+          carryForward: 0,
         },
-      },
-    });
-    if (!balance) throw new LeaveValidationError("Leave balance not found.");
+      });
+    }
 
     const updated = await tx.leaveRequest.update({
       where: { id: request.id },
@@ -269,13 +339,16 @@ export async function approveLeaveRequest(input: {
       },
     });
 
-    await tx.leaveBalance.update({
-      where: { id: balance.id },
-      data: {
-        pending: { decrement: request.days },
-        used: { increment: request.days },
-      },
-    });
+    if (balance) {
+      const newPending = Math.max(0, balance.pending - request.days);
+      await tx.leaveBalance.update({
+        where: { id: balance.id },
+        data: {
+          pending: newPending,
+          used: { increment: request.days },
+        },
+      });
+    }
 
     await writeAuditLog(
       {
@@ -290,7 +363,7 @@ export async function approveLeaveRequest(input: {
       tx
     );
 
-    return { request: updated, balanceId: balance.id };
+    return { request: updated, balanceId: balance?.id ?? null };
   });
 }
 

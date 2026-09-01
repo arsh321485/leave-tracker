@@ -13,6 +13,8 @@ type Policy = {
   maxConsecutiveDays: number | null;
   requiresManagerApproval: boolean;
   allowDuringProbation: boolean;
+  monthlyQuota: number | null;
+  requiresEligibility: boolean;
   leaveType: { name: string; code: string };
 };
 
@@ -63,14 +65,22 @@ export default function PoliciesPage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="grid gap-3 md:grid-cols-3">
-              <label className="text-sm">
-                Annual allocation
-                <Input
-                  type="number"
-                  value={p.annualAllocation}
-                  onChange={(e) => update(p.id, { annualAllocation: Number(e.target.value) })}
-                />
-              </label>
+              {p.leaveType.code === "MENSTRUATION" ? (
+                <p className="text-sm text-slate-600 md:col-span-3">
+                  1 day per calendar month. Unused days expire at month end. Only employees
+                  marked eligible on the Employees page can apply. Assign eligible employees via
+                  Edit → &quot;Eligible for Menstruation Leave&quot;.
+                </p>
+              ) : (
+                <label className="text-sm">
+                  Annual allocation
+                  <Input
+                    type="number"
+                    value={p.annualAllocation}
+                    onChange={(e) => update(p.id, { annualAllocation: Number(e.target.value) })}
+                  />
+                </label>
+              )}
               <label className="text-sm">
                 Carry forward limit
                 <Input

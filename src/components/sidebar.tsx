@@ -15,6 +15,7 @@ const links: { href: string; label: string; roles?: Role[] }[] = [
   { href: "/leave/holidays", label: "Holidays", roles: ["SUPER_ADMIN", "HR_ADMIN"] },
   { href: "/leave/types", label: "Leave Types", roles: ["SUPER_ADMIN", "HR_ADMIN"] },
   { href: "/leave/policies", label: "Policies", roles: ["SUPER_ADMIN", "HR_ADMIN"] },
+  { href: "/leave/settings", label: "Slack Settings", roles: ["SUPER_ADMIN", "HR_ADMIN"] },
   { href: "/leave/calendar", label: "Calendar" },
   { href: "/leave/reports", label: "Reports", roles: ["SUPER_ADMIN", "HR_ADMIN", "MANAGER"] },
   { href: "/leave/audit-logs", label: "Audit Logs", roles: ["SUPER_ADMIN", "HR_ADMIN"] },

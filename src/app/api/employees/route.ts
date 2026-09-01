@@ -4,6 +4,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireSession, jsonError } from "@/lib/api";
 import { writeAuditLog } from "@/lib/audit";
+import { ensureEmployeeBalances } from "@/lib/leave/balances";
 
 const createSchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -32,10 +33,21 @@ export async function GET(req: NextRequest) {
     | null;
   const employees = await prisma.employee.findMany({
     where: status ? { status } : undefined,
-    include: { department: true, manager: true },
+    include: {
+      department: true,
+      manager: true,
+      leaveEligibility: { include: { leaveType: true } },
+    },
     orderBy: { name: "asc" },
   });
-  return NextResponse.json(employees);
+  return NextResponse.json(
+    employees.map((e) => ({
+      ...e,
+      menstruationLeaveEligible: e.leaveEligibility.some(
+        (x) => x.leaveType.code === "MENSTRUATION"
+      ),
+    }))
+  );
 }
 
 export async function POST(req: NextRequest) {
@@ -112,6 +124,7 @@ export async function POST(req: NextRequest) {
       },
       include: { department: true, manager: true },
     });
+    await ensureEmployeeBalances(employee.id);
     await writeAuditLog({
       actorId: user.id,
       actorLabel: user.name,

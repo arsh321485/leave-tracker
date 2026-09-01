@@ -8,7 +8,7 @@ import {
   createLeaveRequest,
   LeaveValidationError,
 } from "@/lib/leave/service";
-import { notifyManagerOfLeave } from "@/lib/slack/handlers";
+import { notifyManagerOfLeave } from "@/lib/slack/notifications";
 import { logger } from "@/lib/logger";
 
 const createSchema = z.object({

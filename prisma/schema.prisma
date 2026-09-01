@@ -109,6 +109,7 @@ model Employee {
   leaveBalances            LeaveBalance[]
   leaveRequests            LeaveRequest[]
   optionalHolidaySelections OptionalHolidaySelection[]
+  leaveEligibility         EmployeeLeaveEligibility[]
   approvedRequests         LeaveRequest[] @relation("LeaveApprover")
   rejectedRequests         LeaveRequest[] @relation("LeaveRejector")
   holidaysCreated          Holiday[]      @relation("HolidayCreator")
@@ -127,9 +128,10 @@ model LeaveType {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  policy   LeavePolicy?
-  balances LeaveBalance[]
-  requests LeaveRequest[]
+  policy       LeavePolicy?
+  balances     LeaveBalance[]
+  requests     LeaveRequest[]
+  eligibleFor  EmployeeLeaveEligibility[]
 }
 
 model LeavePolicy {
@@ -143,8 +145,29 @@ model LeavePolicy {
   requiresManagerApproval Boolean  @default(true)
   allowHalfDay            Boolean  @default(true)
   allowDuringProbation    Boolean  @default(false)
+  monthlyQuota            Float?
+  expiresMonthly          Boolean  @default(false)
+  requiresEligibility     Boolean  @default(false)
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
+}
+
+model EmployeeLeaveEligibility {
+  id          String    @id @default(cuid())
+  employeeId  String
+  employee    Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  leaveTypeId String
+  leaveType   LeaveType @relation(fields: [leaveTypeId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+
+  @@unique([employeeId, leaveTypeId])
+  @@index([leaveTypeId])
+}
+
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
 }
 
 model LeaveBalance {

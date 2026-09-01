@@ -4,6 +4,11 @@ import { z } from "zod";
 import { requireSession, jsonError } from "@/lib/api";
 import { isAdmin } from "@/lib/rbac";
 import { rejectLeaveRequest, LeaveValidationError } from "@/lib/leave/service";
+import {
+  notifyEmployeeLeaveRejected,
+  updateManagerSlackMessage,
+} from "@/lib/slack/notifications";
+import { logger } from "@/lib/logger";
 
 type Ctx = { params: Promise<{ id: string }> };
 const schema = z.object({ reason: z.string().min(1) });
@@ -31,9 +36,21 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       actorLabel: user.name,
       asAdmin: isAdmin(user.role),
     });
+
+    try {
+      await updateManagerSlackMessage(
+        result.request.id,
+        `❌ *REJECTED* by ${user.name}\n${result.request.employee.name} — ${result.request.leaveType.name}`
+      );
+      await notifyEmployeeLeaveRejected(result.request.id, user.name, body.reason);
+    } catch (e) {
+      logger.warn({ err: e }, "Slack notification after reject failed");
+    }
+
     return NextResponse.json(result.request);
   } catch (e) {
     if (e instanceof LeaveValidationError) return jsonError(e.message);
-    throw e;
+    logger.error({ err: e, requestId: id }, "Reject leave failed");
+    return jsonError(e instanceof Error ? e.message : "Rejection failed", 500);
   }
 }

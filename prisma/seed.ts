@@ -17,14 +17,19 @@ async function main() {
     create: { name: "Human Resources" },
   });
 
-  // Half/full day is a duration on each leave type, not separate leave types.
   const leaveTypes = [
     { code: "CASUAL", name: "Casual Leave", allocation: 12 },
     { code: "SICK", name: "Sick Leave", allocation: 12 },
     { code: "ANNUAL", name: "Annual Leave", allocation: 15 },
-    { code: "EARNED", name: "Earned Leave", allocation: 12 },
-    { code: "UNPAID", name: "Unpaid Leave", allocation: 30 },
-    { code: "OPTIONAL", name: "Optional Holiday", allocation: 2 },
+    {
+      code: "MENSTRUATION",
+      name: "Menstruation Leave",
+      allocation: 0,
+      monthlyQuota: 1,
+      expiresMonthly: true,
+      requiresEligibility: true,
+      maxDays: 1,
+    },
   ];
 
   for (const lt of leaveTypes) {
@@ -37,25 +42,33 @@ async function main() {
       where: { leaveTypeId: type.id },
       update: {
         annualAllocation: lt.allocation,
-        allowHalfDay: true,
-        requiresManagerApproval: lt.code !== "UNPAID",
+        allowHalfDay: lt.code !== "MENSTRUATION",
+        requiresManagerApproval: true,
+        monthlyQuota: lt.monthlyQuota ?? null,
+        expiresMonthly: lt.expiresMonthly ?? false,
+        requiresEligibility: lt.requiresEligibility ?? false,
+        maxConsecutiveDays: lt.maxDays ?? (lt.code === "CASUAL" ? 5 : 15),
       },
       create: {
         leaveTypeId: type.id,
         annualAllocation: lt.allocation,
-        carryForwardEnabled: lt.code === "ANNUAL" || lt.code === "EARNED",
+        carryForwardEnabled: lt.code === "ANNUAL",
         carryForwardLimit: 5,
-        maxConsecutiveDays: lt.code === "CASUAL" ? 5 : 15,
+        maxConsecutiveDays: lt.maxDays ?? (lt.code === "CASUAL" ? 5 : 15),
         requiresManagerApproval: true,
-        allowHalfDay: true,
+        allowHalfDay: lt.code !== "MENSTRUATION",
         allowDuringProbation: lt.code === "SICK",
+        monthlyQuota: lt.monthlyQuota ?? null,
+        expiresMonthly: lt.expiresMonthly ?? false,
+        requiresEligibility: lt.requiresEligibility ?? false,
       },
     });
   }
 
-  // Legacy leave types: Comp Off / Half Day are no longer used as types.
   await prisma.leaveType.updateMany({
-    where: { code: { in: ["COMP_OFF", "HALF_DAY"] } },
+    where: {
+      code: { in: ["COMP_OFF", "HALF_DAY", "EARNED", "UNPAID", "OPTIONAL"] },
+    },
     data: { isActive: false },
   });
 
@@ -148,7 +161,10 @@ async function main() {
     },
   });
 
-  const types = await prisma.leaveType.findMany({ include: { policy: true } });
+  const types = await prisma.leaveType.findMany({
+    where: { isActive: true, policy: { monthlyQuota: null } },
+    include: { policy: true },
+  });
   for (const emp of [manager, employee, hrAdminEmp]) {
     for (const t of types) {
       await prisma.leaveBalance.upsert({

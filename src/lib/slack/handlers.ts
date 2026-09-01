@@ -2,16 +2,25 @@ import { WebClient } from "@slack/web-api";
 import { format } from "date-fns";
 import { LeaveDuration } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { remainingBalance, formatDateRange } from "@/lib/utils";
+import { formatDateRange } from "@/lib/utils";
 import {
   createLeaveRequest,
   approveLeaveRequest,
   rejectLeaveRequest,
   LeaveValidationError,
 } from "@/lib/leave/service";
-import { leaveHomeBlocks, managerApprovalBlocks, welcomeBlocks } from "@/lib/slack/blocks";
+import { leaveHomeBlocks, welcomeBlocks } from "@/lib/slack/blocks";
 import { getSlackClient, openDmChannel, SLACK_CALLBACKS } from "@/lib/slack/client";
-import { logger } from "@/lib/logger";
+import {
+  notifyManagerOfLeave,
+  notifyEmployeeLeaveApproved,
+  notifyEmployeeLeaveRejected,
+  updateManagerSlackMessage,
+} from "@/lib/slack/notifications";
+import {
+  getEmployeeBalancesForDisplay,
+  getEligibleLeaveTypesForEmployee,
+} from "@/lib/leave/balances";
 import { hashPayload, withIdempotency } from "@/lib/idempotency";
 
 export async function resolveEmployeeBySlackUserId(slackUserId: string) {
@@ -88,15 +97,8 @@ export async function handleSlashLeave(payload: {
   });
 }
 
-async function buildApplyLeaveView() {
-  const types = await prisma.leaveType.findMany({
-    where: {
-      isActive: true,
-      code: { notIn: ["COMP_OFF", "HALF_DAY"] },
-    },
-    orderBy: { name: "asc" },
-    take: 100,
-  });
+async function buildApplyLeaveView(employeeId: string) {
+  const types = await getEligibleLeaveTypesForEmployee(employeeId);
 
   if (!types.length) {
     throw new Error("No active leave types configured. Ask HR to add leave types.");
@@ -165,57 +167,6 @@ async function buildApplyLeaveView() {
   };
 }
 
-export async function notifyManagerOfLeave(requestId: string) {
-  const request = await prisma.leaveRequest.findUnique({
-    where: { id: requestId },
-    include: {
-      employee: { include: { manager: true } },
-      leaveType: true,
-    },
-  });
-  if (!request?.employee.manager?.slackUserId) {
-    logger.warn({ requestId }, "Manager has no Slack user ID; skipping DM");
-    return;
-  }
-
-  const year = request.startDate.getUTCFullYear();
-  const balance = await prisma.leaveBalance.findUnique({
-    where: {
-      employeeId_leaveTypeId_year: {
-        employeeId: request.employeeId,
-        leaveTypeId: request.leaveTypeId,
-        year,
-      },
-    },
-  });
-
-  const client = getSlackClient();
-  const channelId = await openDmChannel(client, request.employee.manager.slackUserId);
-  if (!channelId) return;
-
-  const result = await client.chat.postMessage({
-    channel: channelId,
-    text: "Leave approval required",
-    blocks: managerApprovalBlocks({
-      requestId: request.id,
-      employeeName: request.employee.name,
-      leaveType: request.leaveType.name,
-      dateRange: formatDateRange(request.startDate, request.endDate),
-      days: request.days,
-      reason: request.reason,
-      balanceRemaining: balance ? remainingBalance(balance) : 0,
-    }),
-  });
-
-  await prisma.leaveRequest.update({
-    where: { id: request.id },
-    data: {
-      slackMessageTs: result.ts,
-      slackChannelId: channelId,
-    },
-  });
-}
-
 type BlockPayload = {
   user: { id: string };
   trigger_id: string;
@@ -257,21 +208,16 @@ export async function handleModalActionFast(payload: BlockPayload) {
   }
 
   if (action.action_id === "apply_leave") {
-    const view = await buildApplyLeaveView();
+    const view = await buildApplyLeaveView(employee.id);
     await openOrPushView(client, payload.trigger_id, view, fromModal);
     return;
   }
 
   if (action.action_id === "my_balance") {
-    const year = new Date().getFullYear();
-    const balances = await prisma.leaveBalance.findMany({
-      where: { employeeId: employee.id, year },
-      include: { leaveType: true },
-      orderBy: { leaveType: { name: "asc" } },
-    });
+    const balances = await getEmployeeBalancesForDisplay(employee.id);
     const lines = balances.map((b) => {
-      const rem = remainingBalance(b);
-      return `*${b.leaveType.name}*\nAllocated: ${b.allocated} | Used: ${b.used} | Pending: ${b.pending} | Remaining: ${rem}`;
+      const suffix = b.monthly ? " (this month)" : "";
+      return `*${b.leaveType.name}*${suffix}\nAllocated: ${b.allocated} | Used: ${b.used} | Pending: ${b.pending} | Remaining: ${b.remaining}`;
     });
     const text = `🏖️ *MY LEAVE BALANCE*\n\n${lines.join("\n\n") || "No balances found."}`;
     await openOrPushView(client, payload.trigger_id, infoModal("My Balance", text), fromModal);
@@ -283,13 +229,13 @@ export async function handleModalActionFast(payload: BlockPayload) {
       where: { employeeId: employee.id },
       include: { leaveType: true, approvedBy: true, rejectedBy: true },
       orderBy: { createdAt: "desc" },
-      take: 15,
+      take: 20,
     });
     const lines = history.map((r) => {
       const mgr = r.approvedBy?.name || r.rejectedBy?.name || "-";
-      return `*${formatDateRange(r.startDate, r.endDate)}*\n${r.leaveType.name} · ${r.days} days · ${r.status} · ${mgr}`;
+      return `*${formatDateRange(r.startDate, r.endDate)}*\n${r.leaveType.name} · ${r.days} day(s) · ${r.status} · ${mgr}`;
     });
-    const text = `📋 *My Leave History*\n\n${lines.join("\n\n") || "No leave history."}`;
+    const text = `📋 *My Leave History*\n\n${lines.join("\n\n") || "No leave requests yet."}`;
     await openOrPushView(client, payload.trigger_id, infoModal("Leave History", text), fromModal);
     return;
   }
@@ -380,41 +326,12 @@ export async function handleBlockActions(payload: BlockPayload) {
           approverEmployeeId: employee.id,
           actorLabel: employee.name,
         });
-        const year = request.startDate.getUTCFullYear();
-        const bal = await prisma.leaveBalance.findUnique({
-          where: {
-            employeeId_leaveTypeId_year: {
-              employeeId: request.employeeId,
-              leaveTypeId: request.leaveTypeId,
-              year,
-            },
-          },
-        });
 
-        if (request.slackChannelId && request.slackMessageTs) {
-          await client.chat.update({
-            channel: request.slackChannelId,
-            ts: request.slackMessageTs,
-            text: `Approved — ${request.employee.name}`,
-            blocks: [
-              {
-                type: "section",
-                text: {
-                  type: "mrkdwn",
-                  text: `✅ *APPROVED* by ${employee.name}\n${request.employee.name} — ${request.leaveType.name} (${formatDateRange(request.startDate, request.endDate)})`,
-                },
-              },
-            ],
-          });
-        }
-
-        if (request.employee.slackUserId) {
-          await dmUser(
-            client,
-            request.employee.slackUserId,
-            `✅ LEAVE APPROVED\n\nYour leave request has been approved.\n\nLeave: ${request.leaveType.name}\nDate: ${formatDateRange(request.startDate, request.endDate)}\nDays: ${request.days}\nApproved By: ${employee.name}\nRemaining Balance: ${bal ? remainingBalance(bal) : "n/a"} days`
-          );
-        }
+        await updateManagerSlackMessage(
+          request.id,
+          `✅ *APPROVED* by ${employee.name}\n${request.employee.name} — ${request.leaveType.name} (${formatDateRange(request.startDate, request.endDate)})`
+        );
+        await notifyEmployeeLeaveApproved(request.id, employee.name);
       } catch (e) {
         const msg = e instanceof LeaveValidationError ? e.message : "Approval failed";
         await dmUser(client, payload.user.id, msg);
@@ -506,29 +423,11 @@ export async function processViewSubmissionBackground(payload: ViewPayload) {
           reason,
           actorLabel: employee.name,
         });
-        if (request.slackChannelId && request.slackMessageTs) {
-          await client.chat.update({
-            channel: request.slackChannelId,
-            ts: request.slackMessageTs,
-            text: `Rejected — ${request.employee.name}`,
-            blocks: [
-              {
-                type: "section",
-                text: {
-                  type: "mrkdwn",
-                  text: `❌ *REJECTED* by ${employee.name}\n${request.employee.name} — ${request.leaveType.name}`,
-                },
-              },
-            ],
-          });
-        }
-        if (request.employee.slackUserId) {
-          await dmUser(
-            client,
-            request.employee.slackUserId,
-            `❌ LEAVE REJECTED\n\nYour leave request has been rejected.\n\nDate: ${formatDateRange(request.startDate, request.endDate)}\nReason: ${reason}\nRejected By: ${employee.name}`
-          );
-        }
+        await updateManagerSlackMessage(
+          request.id,
+          `❌ *REJECTED* by ${employee.name}\n${request.employee.name} — ${request.leaveType.name}`
+        );
+        await notifyEmployeeLeaveRejected(request.id, employee.name, reason);
       } catch (e) {
         const msg = e instanceof LeaveValidationError ? e.message : "Rejection failed.";
         await dm(`❌ ${msg}`);
