@@ -39,7 +39,18 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
         result.request.id,
         `✅ *APPROVED* by ${user.name}\n${result.request.employee.name} — ${result.request.leaveType.name} (${formatDateRange(result.request.startDate, result.request.endDate)})`
       );
-      await notifyEmployeeLeaveApproved(result.request.id, user.name);
+    } catch (e) {
+      logger.warn({ err: e }, "Could not update manager Slack message after approve");
+    }
+
+    try {
+      const empNotify = await notifyEmployeeLeaveApproved(result.request.id, user.name);
+      if (!empNotify.ok) {
+        logger.warn(
+          { requestId: id, reason: empNotify.reason },
+          "Could not DM employee about approval"
+        );
+      }
     } catch (e) {
       logger.warn({ err: e }, "Slack notification after approve failed");
     }

@@ -18,37 +18,27 @@ export async function ensureEmployeeBalances(employeeId: string, year = new Date
     include: { policy: true },
   });
 
-  for (const t of types) {
-    if (t.policy?.monthlyQuota != null) continue;
-
-    await prisma.leaveBalance.upsert({
-      where: {
-        employeeId_leaveTypeId_year: {
-          employeeId,
-          leaveTypeId: t.id,
-          year,
-        },
-      },
-      update: {},
-      create: {
-        employeeId,
-        leaveTypeId: t.id,
-        year,
-        allocated: t.policy?.annualAllocation ?? 0,
-        used: 0,
-        pending: 0,
-        carryForward: 0,
-      },
-    });
-  }
-}
-
-async function isEligibleForType(employeeId: string, leaveTypeId: string, requiresEligibility: boolean) {
-  if (!requiresEligibility) return true;
-  const row = await prisma.employeeLeaveEligibility.findUnique({
-    where: { employeeId_leaveTypeId: { employeeId, leaveTypeId } },
+  const existing = await prisma.leaveBalance.findMany({
+    where: { employeeId, year },
+    select: { leaveTypeId: true },
   });
-  return Boolean(row);
+  const existingIds = new Set(existing.map((b) => b.leaveTypeId));
+
+  const toCreate = types
+    .filter((t) => t.policy?.monthlyQuota == null && !existingIds.has(t.id))
+    .map((t) => ({
+      employeeId,
+      leaveTypeId: t.id,
+      year,
+      allocated: t.policy?.annualAllocation ?? 0,
+      used: 0,
+      pending: 0,
+      carryForward: 0,
+    }));
+
+  if (toCreate.length) {
+    await prisma.leaveBalance.createMany({ data: toCreate, skipDuplicates: true });
+  }
 }
 
 async function monthlyBalanceRow(
@@ -99,6 +89,12 @@ export async function getEmployeeBalancesForDisplay(
     orderBy: { name: "asc" },
   });
 
+  const eligibilities = await prisma.employeeLeaveEligibility.findMany({
+    where: { employeeId },
+    select: { leaveTypeId: true },
+  });
+  const eligibleIds = new Set(eligibilities.map((e) => e.leaveTypeId));
+
   const balances = await prisma.leaveBalance.findMany({
     where: { employeeId, year },
     include: { leaveType: true },
@@ -108,7 +104,7 @@ export async function getEmployeeBalancesForDisplay(
   const rows: BalanceRow[] = [];
   for (const t of types) {
     const requiresEligibility = t.policy?.requiresEligibility ?? false;
-    if (!(await isEligibleForType(employeeId, t.id, requiresEligibility))) continue;
+    if (requiresEligibility && !eligibleIds.has(t.id)) continue;
 
     if (t.policy?.monthlyQuota != null) {
       rows.push(await monthlyBalanceRow(employeeId, t, t.policy.monthlyQuota));
@@ -130,17 +126,20 @@ export async function getEmployeeBalancesForDisplay(
 }
 
 export async function getEligibleLeaveTypesForEmployee(employeeId: string) {
-  const types = await prisma.leaveType.findMany({
-    where: activeLeaveTypeWhere(),
-    include: { policy: true },
-    orderBy: { name: "asc" },
-  });
+  const [types, eligibilities] = await Promise.all([
+    prisma.leaveType.findMany({
+      where: activeLeaveTypeWhere(),
+      include: { policy: true },
+      orderBy: { name: "asc" },
+    }),
+    prisma.employeeLeaveEligibility.findMany({
+      where: { employeeId },
+      select: { leaveTypeId: true },
+    }),
+  ]);
 
-  const eligible: typeof types = [];
-  for (const t of types) {
-    if (await isEligibleForType(employeeId, t.id, t.policy?.requiresEligibility ?? false)) {
-      eligible.push(t);
-    }
-  }
-  return eligible;
+  const eligibleIds = new Set(eligibilities.map((e) => e.leaveTypeId));
+  return types.filter(
+    (t) => !t.policy?.requiresEligibility || eligibleIds.has(t.id)
+  );
 }

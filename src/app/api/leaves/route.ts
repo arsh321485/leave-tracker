@@ -91,7 +91,10 @@ export async function POST(req: NextRequest) {
       actorLabel: user.name,
     });
     try {
-      await notifyManagerOfLeave(request.id);
+      const notified = await notifyManagerOfLeave(request.id);
+      if (!notified.ok) {
+        logger.warn({ requestId: request.id, reason: notified.reason }, "Manager Slack notify failed");
+      }
     } catch (e) {
       logger.warn({ err: e }, "Failed to notify manager via Slack");
     }

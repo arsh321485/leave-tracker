@@ -174,6 +174,7 @@ A workspace Owner/Admin must:
 5. **OAuth & Permissions** → Bot scopes below
 6. **Event Subscriptions** →  
    `https://YOUR-DOMAIN.com/api/slack/events`
+   https://leave-tracker-pi.vercel.app/api/slack/events
 7. **Interactivity** →  
    `https://YOUR-DOMAIN.com/api/slack/interactions`
 8. **Slash Command** `/leave` →  
@@ -189,6 +190,7 @@ Local Slack testing needs an HTTPS tunnel (ngrok/cloudflared) pointing at your m
 - `chat:write`
 - `im:write`
 - `im:history`
+- `chat:write.public` (optional; for posting to public channels)
 - `users:read`
 - `users:read.email`
 - `channels:read`
@@ -273,7 +275,8 @@ Health check: `GET /api/health`
 |-------|--------|
 | Slack signature failures | `SLACK_SIGNING_SECRET`, server clock |
 | `/leave` does nothing | Slash URL, bot install, HTTPS tunnel / Vercel URL |
-| Manager no DM | Manager has `slackUserId` mapped; `im:write` |
+| Manager no DM | Manager has `slackUserId` on Employees page; manager should run `/leave` once; `im:write` scope |
+| Employee no approve DM | Employee has `slackUserId` on Employees page (same Slack ID they use for `/leave`) |
 | Channel posts fail | Bot invited to `#leave-tracker`; correct `SLACK_LEAVE_CHANNEL_ID` |
 | Login / DB errors | `DATABASE_URL` + `DIRECT_URL` from Supabase Database settings |
 

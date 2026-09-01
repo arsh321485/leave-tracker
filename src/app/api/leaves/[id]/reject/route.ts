@@ -42,7 +42,22 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         result.request.id,
         `❌ *REJECTED* by ${user.name}\n${result.request.employee.name} — ${result.request.leaveType.name}`
       );
-      await notifyEmployeeLeaveRejected(result.request.id, user.name, body.reason);
+    } catch (e) {
+      logger.warn({ err: e }, "Could not update manager Slack message after reject");
+    }
+
+    try {
+      const empNotify = await notifyEmployeeLeaveRejected(
+        result.request.id,
+        user.name,
+        body.reason
+      );
+      if (!empNotify.ok) {
+        logger.warn(
+          { requestId: id, reason: empNotify.reason },
+          "Could not DM employee about rejection"
+        );
+      }
     } catch (e) {
       logger.warn({ err: e }, "Slack notification after reject failed");
     }

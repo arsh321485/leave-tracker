@@ -60,9 +60,11 @@ export default function SettingsPage() {
                 placeholder="U01234567 or C01234567"
               />
               <p className="mt-1 text-xs text-slate-500">
-                Recommended: use a <strong>channel ID</strong> (starts with C) — create e.g.
-                #team-status, invite the Leave Tracker bot, paste the channel ID here.
-                User DMs (U…) also work if the bot has messaged that user before via /leave.
+                <strong>Morning digest only</strong> — this can be a channel (C…) or a user (U…).
+                Leave approve/reject messages always go to the <strong>employee&apos;s personal Slack DM</strong> (their Slack User ID on the Employees page).
+              </p>
+              <p className="mt-1 text-xs text-amber-700">
+                Manager not getting leave requests? Edit the manager on Employees → set their Slack User ID (U…). The manager must have used /leave at least once.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">

@@ -183,12 +183,37 @@ export async function handleModalActionFast(payload: BlockPayload) {
 
   const client = getSlackClient();
   const fromModal = Boolean(payload.view);
+  const slackUserId = payload.user.id;
 
-  const employee = await resolveEmployeeBySlackUserId(payload.user.id);
+  // Apply leave: resolve employee only for this path (fastest open-modal flow)
+  if (action.action_id === "apply_leave") {
+    const employee = await resolveEmployeeBySlackUserId(slackUserId);
+    if (!employee || employee.status !== "ACTIVE") {
+      await dmUser(
+        client,
+        slackUserId,
+        "Your Slack account is not mapped to an active employee. Contact HR."
+      );
+      if (fromModal) {
+        await openOrPushView(
+          client,
+          payload.trigger_id,
+          infoModal("Not mapped", "Your Slack account is not mapped to an active employee. Contact HR."),
+          true
+        );
+      }
+      return;
+    }
+    const view = await buildApplyLeaveView(employee.id);
+    await openOrPushView(client, payload.trigger_id, view, fromModal);
+    return;
+  }
+
+  const employee = await resolveEmployeeBySlackUserId(slackUserId);
   if (!employee || employee.status !== "ACTIVE") {
     await dmUser(
       client,
-      payload.user.id,
+      slackUserId,
       "Your Slack account is not mapped to an active employee. Contact HR."
     );
     if (fromModal) {
@@ -199,12 +224,6 @@ export async function handleModalActionFast(payload: BlockPayload) {
         true
       );
     }
-    return;
-  }
-
-  if (action.action_id === "apply_leave") {
-    const view = await buildApplyLeaveView(employee.id);
-    await openOrPushView(client, payload.trigger_id, view, fromModal);
     return;
   }
 
@@ -395,10 +414,17 @@ export async function processViewSubmissionBackground(payload: ViewPayload) {
           reason,
           actorLabel: employee.name,
         });
-        await notifyManagerOfLeave(request.id);
-        await dm(
-          `✅ Leave request submitted (${request.days} day(s)). Your manager will review it.`
-        );
+
+        const managerNotify = await notifyManagerOfLeave(request.id);
+        if (managerNotify.ok) {
+          await dm(
+            `✅ Leave request submitted (${request.days} day(s)). Your manager was notified on Slack.`
+          );
+        } else {
+          await dm(
+            `✅ Leave saved (${request.days} day(s)), but your manager was *not* notified on Slack.\n\nReason: ${managerNotify.reason}\n\nAsk HR to set your manager's Slack User ID on the Employees page.`
+          );
+        }
       } catch (e) {
         const msg =
           e instanceof LeaveValidationError ? e.message : "Could not create leave request.";

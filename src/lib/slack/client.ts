@@ -2,6 +2,7 @@ import crypto from "crypto";
 import type { Block, KnownBlock } from "@slack/web-api";
 import { WebClient } from "@slack/web-api";
 import { safeEqual } from "@/lib/idempotency";
+import { logger } from "@/lib/logger";
 
 export function getSlackClient() {
   const token = process.env.SLACK_BOT_TOKEN;
@@ -30,34 +31,58 @@ export function verifySlackSignature(
   return safeEqual(computed, signature);
 }
 
-/**
- * Target for chat.postMessage. User IDs (U…) work directly — do NOT call
- * conversations.open (causes messages_tab_disabled in many workspaces).
- */
 export function resolveSlackMessageTarget(recipient: string) {
   return recipient.trim();
 }
 
-/** @deprecated Use postSlackMessage — conversations.open triggers messages_tab_disabled */
-export async function openDmChannel(_client: WebClient, slackUserId: string) {
-  return slackUserId.trim();
+function slackErrorCode(err: unknown): string | undefined {
+  if (err && typeof err === "object" && "data" in err) {
+    return (err as { data?: { error?: string } }).data?.error;
+  }
+  return undefined;
 }
 
+/** Post to a user DM (U…) or channel (C…). */
 export async function postSlackMessage(
   client: WebClient,
   recipient: string,
   input: { text: string; blocks?: (KnownBlock | Block)[] }
 ) {
-  const channel = resolveSlackMessageTarget(recipient);
-  const result = await client.chat.postMessage({
-    channel,
+  const target = resolveSlackMessageTarget(recipient);
+  const message = {
     text: input.text,
     ...(input.blocks ? { blocks: input.blocks } : {}),
-  });
-  return {
-    channel: (result.channel as string) || channel,
-    ts: result.ts as string,
   };
+
+  async function send(channel: string) {
+    const result = await client.chat.postMessage({ channel, ...message });
+    return {
+      channel: (result.channel as string) || channel,
+      ts: result.ts as string,
+    };
+  }
+
+  try {
+    return await send(target);
+  } catch (first) {
+    const code = slackErrorCode(first);
+    // Some workspaces need a DM channel opened first (not messages_tab_disabled)
+    if (/^[UW]/.test(target) && code === "channel_not_found") {
+      try {
+        const opened = await client.conversations.open({ users: target });
+        const dm = opened.channel?.id;
+        if (dm) return await send(dm);
+      } catch (openErr) {
+        logger.warn({ err: openErr, target }, "conversations.open fallback failed");
+      }
+    }
+    throw first;
+  }
+}
+
+/** @deprecated Use postSlackMessage */
+export async function openDmChannel(_client: WebClient, slackUserId: string) {
+  return slackUserId.trim();
 }
 
 export const SLACK_ACTIONS = {
