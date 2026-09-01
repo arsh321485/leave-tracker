@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { requireSession, jsonError } from "@/lib/api";
 import { writeAuditLog } from "@/lib/audit";
 import { ensureEmployeeBalances } from "@/lib/leave/balances";
+import { logger } from "@/lib/logger";
 
 const createSchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -148,9 +149,10 @@ export async function POST(req: NextRequest) {
       }
       return jsonError(`Could not create employee (database ${e.code})`);
     }
-    console.error("Create employee failed", e);
+    logger.error({ err: e }, "Create employee failed");
     return jsonError(
-      e instanceof Error ? `Could not create employee: ${e.message}` : "Could not create employee"
+      e instanceof Error ? `Could not create employee: ${e.message}` : "Could not create employee",
+      500
     );
   }
 }

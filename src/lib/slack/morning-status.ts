@@ -1,7 +1,7 @@
 import { format } from "date-fns";
 import { LeaveRequestStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { getSlackClient, openDmChannel } from "@/lib/slack/client";
+import { getSlackClient, resolveSlackMessageTarget } from "@/lib/slack/client";
 import { formatDateRange } from "@/lib/utils";
 
 export const SETTING_MORNING_STATUS_SLACK_ID = "slack_morning_status_recipient";
@@ -69,13 +69,18 @@ export async function sendMorningStatusDigest() {
     ...workingLines,
   ].join("\n");
 
-  const client = getSlackClient();
-  const channelId = await openDmChannel(client, recipient.trim());
-  await client.chat.postMessage({
-    channel: channelId || recipient.trim(),
-    text: `Team status for ${dateLabel}`,
-    blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
-  });
+  try {
+    const client = getSlackClient();
+    const channelId = await resolveSlackMessageTarget(client, recipient);
+    await client.chat.postMessage({
+      channel: channelId,
+      text: `Team status for ${dateLabel}`,
+      blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
+    });
 
-  return { ok: true, onLeave: onLeave.length, working: working.length };
+    return { ok: true, onLeave: onLeave.length, working: working.length };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Slack API error";
+    return { ok: false, reason: msg };
+  }
 }

@@ -12,11 +12,26 @@ type AuditInput = {
   metadata?: Prisma.InputJsonValue;
 };
 
+/** Avoid FK errors when session user id is stale (e.g. after DB re-seed). */
+async function resolveActorId(
+  actorId: string | null | undefined,
+  client: Prisma.TransactionClient | typeof prisma
+): Promise<string | null> {
+  if (!actorId) return null;
+  const user = await client.user.findUnique({
+    where: { id: actorId },
+    select: { id: true },
+  });
+  return user?.id ?? null;
+}
+
 export async function writeAuditLog(input: AuditInput, tx?: Prisma.TransactionClient) {
   const client = tx ?? prisma;
+  const actorId = await resolveActorId(input.actorId, client);
+
   return client.leaveAuditLog.create({
     data: {
-      actorId: input.actorId ?? null,
+      actorId,
       actorLabel: input.actorLabel ?? null,
       action: input.action,
       objectType: input.objectType,

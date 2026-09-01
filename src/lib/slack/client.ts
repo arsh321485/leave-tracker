@@ -29,6 +29,16 @@ export function verifySlackSignature(
   return safeEqual(computed, signature);
 }
 
+export async function resolveSlackMessageTarget(client: WebClient, recipient: string) {
+  const trimmed = recipient.trim();
+  // Channel / group IDs — post directly (conversations.open is for user DMs only)
+  if (/^[CGD]/.test(trimmed)) {
+    return trimmed;
+  }
+  const dm = await openDmChannel(client, trimmed);
+  return dm || trimmed;
+}
+
 export async function openDmChannel(client: WebClient, slackUserId: string) {
   const res = await client.conversations.open({ users: slackUserId });
   return res.channel?.id;
