@@ -1,17 +1,16 @@
-import { WebClient } from "@slack/web-api";
+import type { KnownBlock } from "@slack/web-api";
 import { prisma } from "@/lib/prisma";
 import { remainingBalance, formatDateRange } from "@/lib/utils";
-import { getSlackClient, postSlackMessage } from "@/lib/slack/client";
+import { getSlackClient, postSlackMessage, slackErrorCode } from "@/lib/slack/client";
 import { managerApprovalBlocks } from "@/lib/slack/blocks";
 import { logger } from "@/lib/logger";
+import { normalizeSlackId } from "@/lib/slack/ids";
 
-export type NotifyResult = { ok: true } | { ok: false; reason: string };
+export type NotifyResult = { ok: true; via?: "dm" | "channel" } | { ok: false; reason: string };
 
 function slackErrorMessage(err: unknown): string {
-  if (err && typeof err === "object" && "data" in err) {
-    const data = (err as { data?: { error?: string } }).data;
-    if (data?.error) return data.error;
-  }
+  const code = slackErrorCode(err);
+  if (code) return code;
   return err instanceof Error ? err.message : "Slack API error";
 }
 
@@ -20,24 +19,57 @@ export async function dmEmployee(
   text: string,
   blocks?: Parameters<typeof postSlackMessage>[2]["blocks"]
 ): Promise<NotifyResult> {
-  if (!slackUserId?.trim()) {
+  const id = normalizeSlackId(slackUserId);
+  if (!id) {
     return { ok: false, reason: "No Slack User ID on employee record" };
   }
   try {
     const client = getSlackClient();
-    await postSlackMessage(client, slackUserId, { text, blocks });
-    return { ok: true };
+    await postSlackMessage(client, id, { text, blocks });
+    return { ok: true, via: "dm" };
   } catch (err) {
     const code = slackErrorMessage(err);
-    logger.error({ err, slackUserId }, "Failed to DM employee on Slack");
-    if (code.includes("messages_tab_disabled")) {
-      return {
-        ok: false,
-        reason:
-          "This person has disabled app DMs in Slack. They must open Leave Tracker once via /leave, or enable app messages in Slack settings.",
-      };
-    }
+    logger.error({ err, slackUserId: id }, "Failed to DM employee on Slack");
     return { ok: false, reason: code };
+  }
+}
+
+async function postManagerLeaveRequest(
+  managerSlackUserId: string,
+  blocks: KnownBlock[],
+  text: string
+): Promise<{ channel: string; ts: string; via: "dm" | "channel" }> {
+  const managerId = normalizeSlackId(managerSlackUserId)!;
+  const client = getSlackClient();
+
+  try {
+    const result = await postSlackMessage(client, managerId, { text, blocks });
+    return { ...result, via: "dm" };
+  } catch (dmErr) {
+    const code = slackErrorMessage(dmErr);
+    logger.warn({ err: dmErr, managerId, code }, "Manager DM failed, trying leave channel");
+
+    const leaveChannel = process.env.SLACK_LEAVE_CHANNEL_ID?.trim();
+    if (!leaveChannel) {
+      throw dmErr;
+    }
+
+    const channelBlocks: KnownBlock[] = [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: `<@${managerId}> 🔔 *Leave approval required* — please review below.`,
+        },
+      },
+      ...blocks,
+    ];
+
+    const result = await postSlackMessage(client, leaveChannel, {
+      text: `<@${managerId}> Leave approval required`,
+      blocks: channelBlocks,
+    });
+    return { ...result, via: "channel" };
   }
 }
 
@@ -56,21 +88,17 @@ export async function notifyManagerOfLeave(requestId: string): Promise<NotifyRes
 
   const manager = request.employee.manager;
   if (!manager) {
-    logger.warn({ requestId, employeeId: request.employeeId }, "Employee has no manager assigned");
     return {
       ok: false,
       reason: `No manager assigned to ${request.employee.name}. Set a manager on the Employees page.`,
     };
   }
 
-  if (!manager.slackUserId?.trim()) {
-    logger.warn(
-      { requestId, managerId: manager.id, managerName: manager.name },
-      "Manager has no Slack User ID"
-    );
+  const managerSlackId = normalizeSlackId(manager.slackUserId);
+  if (!managerSlackId) {
     return {
       ok: false,
-      reason: `Manager "${manager.name}" has no Slack User ID. Edit them on Employees page and add their Slack ID (U…).`,
+      reason: `Manager "${manager.name}" has no Slack User ID. Edit them on Employees and link via Slack sync.`,
     };
   }
 
@@ -85,20 +113,22 @@ export async function notifyManagerOfLeave(requestId: string): Promise<NotifyRes
     },
   });
 
+  const blocks = managerApprovalBlocks({
+    requestId: request.id,
+    employeeName: request.employee.name,
+    leaveType: request.leaveType.name,
+    dateRange: formatDateRange(request.startDate, request.endDate),
+    days: request.days,
+    reason: request.reason,
+    balanceRemaining: balance ? remainingBalance(balance) : 0,
+  });
+
   try {
-    const client = getSlackClient();
-    const result = await postSlackMessage(client, manager.slackUserId, {
-      text: `Leave approval required — ${request.employee.name}`,
-      blocks: managerApprovalBlocks({
-        requestId: request.id,
-        employeeName: request.employee.name,
-        leaveType: request.leaveType.name,
-        dateRange: formatDateRange(request.startDate, request.endDate),
-        days: request.days,
-        reason: request.reason,
-        balanceRemaining: balance ? remainingBalance(balance) : 0,
-      }),
-    });
+    const result = await postManagerLeaveRequest(
+      managerSlackId,
+      blocks,
+      `Leave approval required — ${request.employee.name}`
+    );
 
     await prisma.leaveRequest.update({
       where: { id: request.id },
@@ -109,14 +139,17 @@ export async function notifyManagerOfLeave(requestId: string): Promise<NotifyRes
     });
 
     logger.info(
-      { requestId, managerId: manager.id, managerSlack: manager.slackUserId },
+      { requestId, managerId: manager.id, managerSlack: managerSlackId, via: result.via },
       "Manager notified on Slack"
     );
-    return { ok: true };
+    return { ok: true, via: result.via };
   } catch (err) {
     const msg = slackErrorMessage(err);
-    logger.error({ err, requestId, managerSlack: manager.slackUserId }, "Manager Slack notify failed");
-    return { ok: false, reason: msg };
+    logger.error({ err, requestId, managerSlack: managerSlackId }, "Manager Slack notify failed");
+    return {
+      ok: false,
+      reason: `${msg}. Set SLACK_LEAVE_CHANNEL_ID, invite the bot to that channel, and ensure manager Slack ID is correct.`,
+    };
   }
 }
 

@@ -275,8 +275,8 @@ Health check: `GET /api/health`
 |-------|--------|
 | Slack signature failures | `SLACK_SIGNING_SECRET`, server clock |
 | `/leave` does nothing | Slash URL, bot install, HTTPS tunnel / Vercel URL |
-| Manager no DM | Manager has `slackUserId` on Employees page; manager should run `/leave` once; `im:write` scope |
-| Employee no approve DM | Employee has `slackUserId` on Employees page (same Slack ID they use for `/leave`) |
+| Manager no DM | Set `SLACK_LEAVE_CHANNEL_ID`, invite bot; manager gets @mention in channel if DM blocked |
+| Employee no approve DM | Employee linked via Slack sync; they must use `/leave` so bot can DM them |
 | Channel posts fail | Bot invited to `#leave-tracker`; correct `SLACK_LEAVE_CHANNEL_ID` |
 | Login / DB errors | `DATABASE_URL` + `DIRECT_URL` from Supabase Database settings |
 

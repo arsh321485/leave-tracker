@@ -2,6 +2,7 @@ import { format } from "date-fns";
 import { LeaveRequestStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getSlackClient, postSlackMessage } from "@/lib/slack/client";
+import { normalizeSlackId } from "@/lib/slack/ids";
 import { formatDateRange } from "@/lib/utils";
 
 export const SETTING_MORNING_STATUS_SLACK_ID = "slack_morning_status_recipient";
@@ -20,8 +21,8 @@ export async function setAppSetting(key: string, value: string) {
 }
 
 export async function sendMorningStatusDigest() {
-  const recipient = await getAppSetting(SETTING_MORNING_STATUS_SLACK_ID);
-  if (!recipient?.trim()) {
+  const recipient = normalizeSlackId(await getAppSetting(SETTING_MORNING_STATUS_SLACK_ID));
+  if (!recipient) {
     return { ok: false, reason: "No morning status Slack recipient configured" };
   }
 

@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { requireSession, jsonError } from "@/lib/api";
 import { writeAuditLog } from "@/lib/audit";
 import { MENSTRUATION_LEAVE_CODE } from "@/lib/leave/constants";
+import { normalizeSlackId } from "@/lib/slack/ids";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -67,7 +68,7 @@ export async function PUT(req: NextRequest, ctx: Ctx) {
 
   const departmentId = body.departmentId !== undefined ? emptyToNull(body.departmentId) : undefined;
   const managerId = body.managerId !== undefined ? emptyToNull(body.managerId) : undefined;
-  const slackUserId = body.slackUserId !== undefined ? emptyToNull(body.slackUserId) : undefined;
+  const slackUserId = body.slackUserId !== undefined ? normalizeSlackId(body.slackUserId) : undefined;
   const designation = body.designation !== undefined ? emptyToNull(body.designation) : undefined;
 
   if (departmentId) {

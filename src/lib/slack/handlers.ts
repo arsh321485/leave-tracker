@@ -418,7 +418,9 @@ export async function processViewSubmissionBackground(payload: ViewPayload) {
         const managerNotify = await notifyManagerOfLeave(request.id);
         if (managerNotify.ok) {
           await dm(
-            `✅ Leave request submitted (${request.days} day(s)). Your manager was notified on Slack.`
+            managerNotify.via === "channel"
+              ? `✅ Leave submitted (${request.days} day(s)). Your manager was notified in the team leave channel (could not DM them directly).`
+              : `✅ Leave request submitted (${request.days} day(s)). Your manager was notified on Slack.`
           );
         } else {
           await dm(

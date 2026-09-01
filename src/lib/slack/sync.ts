@@ -1,6 +1,7 @@
 import { WebClient } from "@slack/web-api";
 import { getSlackClient } from "@/lib/slack/client";
 import { prisma } from "@/lib/prisma";
+import { normalizeSlackId } from "@/lib/slack/ids";
 
 export type SlackUserRow = {
   slackUserId: string;
@@ -59,14 +60,18 @@ export async function syncSlackUsers(): Promise<SlackUserRow[]> {
 }
 
 export async function mapSlackUser(employeeId: string, slackUserId: string, slackName?: string) {
+  const normalizedId = normalizeSlackId(slackUserId);
+  if (!normalizedId) {
+    throw new Error("Invalid Slack User ID");
+  }
   const existing = await prisma.employee.findFirst({
-    where: { slackUserId, NOT: { id: employeeId } },
+    where: { slackUserId: normalizedId, NOT: { id: employeeId } },
   });
   if (existing) {
     throw new Error(`Slack user already mapped to ${existing.name}`);
   }
   return prisma.employee.update({
     where: { id: employeeId },
-    data: { slackUserId, slackName: slackName || undefined },
+    data: { slackUserId: normalizedId, slackName: slackName || undefined },
   });
 }

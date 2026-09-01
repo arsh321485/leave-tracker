@@ -6,6 +6,7 @@ import { requireSession, jsonError } from "@/lib/api";
 import { writeAuditLog } from "@/lib/audit";
 import { ensureEmployeeBalances } from "@/lib/leave/balances";
 import { logger } from "@/lib/logger";
+import { normalizeSlackId } from "@/lib/slack/ids";
 
 const createSchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -70,7 +71,7 @@ export async function POST(req: NextRequest) {
 
   const body = parsed.data;
   const email = body.email.trim().toLowerCase();
-  const slackUserId = emptyToNull(body.slackUserId);
+  const slackUserId = normalizeSlackId(body.slackUserId ?? null);
   const departmentId = emptyToNull(body.departmentId);
   const managerId = emptyToNull(body.managerId);
   const designation = emptyToNull(body.designation);
