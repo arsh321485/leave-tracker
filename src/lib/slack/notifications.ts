@@ -1,16 +1,11 @@
 import { WebClient } from "@slack/web-api";
 import { prisma } from "@/lib/prisma";
 import { remainingBalance, formatDateRange } from "@/lib/utils";
-import { getSlackClient, openDmChannel } from "@/lib/slack/client";
+import { getSlackClient, postSlackMessage } from "@/lib/slack/client";
 import { managerApprovalBlocks } from "@/lib/slack/blocks";
 
 async function dmUser(client: WebClient, slackUserId: string, text: string) {
-  const channelId = await openDmChannel(client, slackUserId);
-  if (channelId) {
-    await client.chat.postMessage({ channel: channelId, text });
-  } else {
-    await client.chat.postMessage({ channel: slackUserId, text });
-  }
+  await postSlackMessage(client, slackUserId, { text });
 }
 
 export async function notifyManagerOfLeave(requestId: string) {
@@ -35,11 +30,7 @@ export async function notifyManagerOfLeave(requestId: string) {
   });
 
   const client = getSlackClient();
-  const channelId = await openDmChannel(client, request.employee.manager.slackUserId);
-  if (!channelId) return;
-
-  const result = await client.chat.postMessage({
-    channel: channelId,
+  const result = await postSlackMessage(client, request.employee.manager.slackUserId, {
     text: "Leave approval required",
     blocks: managerApprovalBlocks({
       requestId: request.id,
@@ -56,7 +47,7 @@ export async function notifyManagerOfLeave(requestId: string) {
     where: { id: request.id },
     data: {
       slackMessageTs: result.ts,
-      slackChannelId: channelId,
+      slackChannelId: result.channel,
     },
   });
 }

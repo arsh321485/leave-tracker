@@ -10,7 +10,7 @@ import {
   LeaveValidationError,
 } from "@/lib/leave/service";
 import { leaveHomeBlocks, welcomeBlocks } from "@/lib/slack/blocks";
-import { getSlackClient, openDmChannel, SLACK_CALLBACKS } from "@/lib/slack/client";
+import { getSlackClient, postSlackMessage, SLACK_CALLBACKS } from "@/lib/slack/client";
 import {
   notifyManagerOfLeave,
   notifyEmployeeLeaveApproved,
@@ -42,12 +42,7 @@ export async function postWelcomeToLeaveChannel() {
 }
 
 async function dmUser(client: WebClient, slackUserId: string, text: string) {
-  const channelId = await openDmChannel(client, slackUserId);
-  if (channelId) {
-    await client.chat.postMessage({ channel: channelId, text });
-  } else {
-    await client.chat.postMessage({ channel: slackUserId, text });
-  }
+  await postSlackMessage(client, slackUserId, { text });
 }
 
 /** From an existing modal use push; otherwise open. */

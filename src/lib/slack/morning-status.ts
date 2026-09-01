@@ -1,7 +1,7 @@
 import { format } from "date-fns";
 import { LeaveRequestStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { getSlackClient, resolveSlackMessageTarget } from "@/lib/slack/client";
+import { getSlackClient, postSlackMessage } from "@/lib/slack/client";
 import { formatDateRange } from "@/lib/utils";
 
 export const SETTING_MORNING_STATUS_SLACK_ID = "slack_morning_status_recipient";
@@ -71,16 +71,20 @@ export async function sendMorningStatusDigest() {
 
   try {
     const client = getSlackClient();
-    const channelId = await resolveSlackMessageTarget(client, recipient);
-    await client.chat.postMessage({
-      channel: channelId,
+    await postSlackMessage(client, recipient, {
       text: `Team status for ${dateLabel}`,
       blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
     });
 
     return { ok: true, onLeave: onLeave.length, working: working.length };
   } catch (e) {
-    const msg = e instanceof Error ? e.message : "Slack API error";
-    return { ok: false, reason: msg };
+    const raw = e instanceof Error ? e.message : "Slack API error";
+    const reason =
+      raw.includes("messages_tab_disabled") || raw.includes("cannot_dm_app")
+        ? "Cannot DM this user from the bot. Use a channel ID (C…) instead — invite the Leave Tracker bot to that channel first."
+        : raw.includes("not_in_channel")
+          ? "Bot is not in that channel. Invite the Leave Tracker app to the channel first."
+          : raw;
+    return { ok: false, reason };
   }
 }

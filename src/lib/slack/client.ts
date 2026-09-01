@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import type { Block, KnownBlock } from "@slack/web-api";
 import { WebClient } from "@slack/web-api";
 import { safeEqual } from "@/lib/idempotency";
 
@@ -29,19 +30,34 @@ export function verifySlackSignature(
   return safeEqual(computed, signature);
 }
 
-export async function resolveSlackMessageTarget(client: WebClient, recipient: string) {
-  const trimmed = recipient.trim();
-  // Channel / group IDs — post directly (conversations.open is for user DMs only)
-  if (/^[CGD]/.test(trimmed)) {
-    return trimmed;
-  }
-  const dm = await openDmChannel(client, trimmed);
-  return dm || trimmed;
+/**
+ * Target for chat.postMessage. User IDs (U…) work directly — do NOT call
+ * conversations.open (causes messages_tab_disabled in many workspaces).
+ */
+export function resolveSlackMessageTarget(recipient: string) {
+  return recipient.trim();
 }
 
-export async function openDmChannel(client: WebClient, slackUserId: string) {
-  const res = await client.conversations.open({ users: slackUserId });
-  return res.channel?.id;
+/** @deprecated Use postSlackMessage — conversations.open triggers messages_tab_disabled */
+export async function openDmChannel(_client: WebClient, slackUserId: string) {
+  return slackUserId.trim();
+}
+
+export async function postSlackMessage(
+  client: WebClient,
+  recipient: string,
+  input: { text: string; blocks?: (KnownBlock | Block)[] }
+) {
+  const channel = resolveSlackMessageTarget(recipient);
+  const result = await client.chat.postMessage({
+    channel,
+    text: input.text,
+    ...(input.blocks ? { blocks: input.blocks } : {}),
+  });
+  return {
+    channel: (result.channel as string) || channel,
+    ts: result.ts as string,
+  };
 }
 
 export const SLACK_ACTIONS = {

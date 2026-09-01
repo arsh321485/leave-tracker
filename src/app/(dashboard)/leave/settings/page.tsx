@@ -60,8 +60,9 @@ export default function SettingsPage() {
                 placeholder="U01234567 or C01234567"
               />
               <p className="mt-1 text-xs text-slate-500">
-                Daily at 10:00 AM IST, a DM lists who is working and who is on leave today.
-                Use a user ID for DM, or a channel ID to post in a channel.
+                Recommended: use a <strong>channel ID</strong> (starts with C) — create e.g.
+                #team-status, invite the Leave Tracker bot, paste the channel ID here.
+                User DMs (U…) also work if the bot has messaged that user before via /leave.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
