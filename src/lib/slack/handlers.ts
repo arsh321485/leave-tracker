@@ -15,7 +15,7 @@ import {
   notifyManagerOfLeave,
   notifyEmployeeLeaveApproved,
   notifyEmployeeLeaveRejected,
-  updateManagerSlackMessage,
+  finalizeManagerLeaveRequest,
 } from "@/lib/slack/notifications";
 import {
   getEmployeeBalancesForDisplay,
@@ -341,7 +341,7 @@ export async function handleBlockActions(payload: BlockPayload) {
           actorLabel: employee.name,
         });
 
-        await updateManagerSlackMessage(
+        await finalizeManagerLeaveRequest(
           request.id,
           `✅ *APPROVED* by ${employee.name}\n${request.employee.name} — ${request.leaveType.name} (${formatDateRange(request.startDate, request.endDate)})`
         );
@@ -418,9 +418,9 @@ export async function processViewSubmissionBackground(payload: ViewPayload) {
         const managerNotify = await notifyManagerOfLeave(request.id);
         if (managerNotify.ok) {
           await dm(
-            managerNotify.via === "channel"
-              ? `✅ Leave submitted (${request.days} day(s)). Your manager was notified in the team leave channel (could not DM them directly).`
-              : `✅ Leave request submitted (${request.days} day(s)). Your manager was notified on Slack.`
+            managerNotify.via === "ephemeral"
+              ? `✅ Leave submitted (${request.days} day(s)). Your manager was notified privately (only they can see it).`
+              : `✅ Leave request submitted (${request.days} day(s)). Your manager was notified on Slack DM.`
           );
         } else {
           await dm(
@@ -446,7 +446,7 @@ export async function processViewSubmissionBackground(payload: ViewPayload) {
           reason,
           actorLabel: employee.name,
         });
-        await updateManagerSlackMessage(
+        await finalizeManagerLeaveRequest(
           request.id,
           `❌ *REJECTED* by ${employee.name}\n${request.employee.name} — ${request.leaveType.name}`
         );

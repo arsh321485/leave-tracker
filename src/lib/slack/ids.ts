@@ -13,3 +13,8 @@ export function isSlackUserId(id: string) {
 export function isSlackChannelId(id: string) {
   return /^[CGD]/i.test(id);
 }
+
+/** Public channel (everyone sees posts). D = private DM with bot. */
+export function isPublicSlackChannel(id: string) {
+  return /^[CG]/i.test(id);
+}

@@ -4,9 +4,12 @@ import { remainingBalance, formatDateRange } from "@/lib/utils";
 import { getSlackClient, postSlackMessage, slackErrorCode } from "@/lib/slack/client";
 import { managerApprovalBlocks } from "@/lib/slack/blocks";
 import { logger } from "@/lib/logger";
-import { normalizeSlackId } from "@/lib/slack/ids";
+import { isPublicSlackChannel, normalizeSlackId } from "@/lib/slack/ids";
+import { getAppSetting, SETTING_MORNING_STATUS_SLACK_ID } from "@/lib/slack/morning-status";
 
-export type NotifyResult = { ok: true; via?: "dm" | "channel" } | { ok: false; reason: string };
+export type NotifyResult =
+  | { ok: true; via?: "dm" | "ephemeral" }
+  | { ok: false; reason: string };
 
 function slackErrorMessage(err: unknown): string {
   const code = slackErrorCode(err);
@@ -34,11 +37,12 @@ export async function dmEmployee(
   }
 }
 
-async function postManagerLeaveRequest(
+/** Manager-only: DM first, then ephemeral (visible only to manager, not the whole channel). */
+async function postManagerLeaveRequestPrivate(
   managerSlackUserId: string,
   blocks: KnownBlock[],
   text: string
-): Promise<{ channel: string; ts: string; via: "dm" | "channel" }> {
+): Promise<{ channel: string; ts: string; via: "dm" | "ephemeral" }> {
   const managerId = normalizeSlackId(managerSlackUserId)!;
   const client = getSlackClient();
 
@@ -46,30 +50,27 @@ async function postManagerLeaveRequest(
     const result = await postSlackMessage(client, managerId, { text, blocks });
     return { ...result, via: "dm" };
   } catch (dmErr) {
-    const code = slackErrorMessage(dmErr);
-    logger.warn({ err: dmErr, managerId, code }, "Manager DM failed, trying leave channel");
+    logger.warn({ err: dmErr, managerId }, "Manager DM failed, trying ephemeral");
 
-    const leaveChannel = process.env.SLACK_LEAVE_CHANNEL_ID?.trim();
+    const settingsChannel = normalizeSlackId(
+      await getAppSetting(SETTING_MORNING_STATUS_SLACK_ID)
+    );
+    const leaveChannel =
+      process.env.SLACK_LEAVE_CHANNEL_ID?.trim() ||
+      (settingsChannel && isPublicSlackChannel(settingsChannel) ? settingsChannel : null);
+
     if (!leaveChannel) {
       throw dmErr;
     }
 
-    const channelBlocks: KnownBlock[] = [
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `<@${managerId}> 🔔 *Leave approval required* — please review below.`,
-        },
-      },
-      ...blocks,
-    ];
-
-    const result = await postSlackMessage(client, leaveChannel, {
-      text: `<@${managerId}> Leave approval required`,
-      blocks: channelBlocks,
+    await client.chat.postEphemeral({
+      channel: leaveChannel,
+      user: managerId,
+      text,
+      blocks,
     });
-    return { ...result, via: "channel" };
+
+    return { channel: leaveChannel, ts: "", via: "ephemeral" };
   }
 }
 
@@ -124,7 +125,7 @@ export async function notifyManagerOfLeave(requestId: string): Promise<NotifyRes
   });
 
   try {
-    const result = await postManagerLeaveRequest(
+    const result = await postManagerLeaveRequestPrivate(
       managerSlackId,
       blocks,
       `Leave approval required — ${request.employee.name}`
@@ -133,14 +134,14 @@ export async function notifyManagerOfLeave(requestId: string): Promise<NotifyRes
     await prisma.leaveRequest.update({
       where: { id: request.id },
       data: {
-        slackMessageTs: result.ts,
-        slackChannelId: result.channel,
+        slackMessageTs: result.ts || null,
+        slackChannelId: result.via === "dm" ? result.channel : null,
       },
     });
 
     logger.info(
       { requestId, managerId: manager.id, managerSlack: managerSlackId, via: result.via },
-      "Manager notified on Slack"
+      "Manager notified privately on Slack"
     );
     return { ok: true, via: result.via };
   } catch (err) {
@@ -148,7 +149,7 @@ export async function notifyManagerOfLeave(requestId: string): Promise<NotifyRes
     logger.error({ err, requestId, managerSlack: managerSlackId }, "Manager Slack notify failed");
     return {
       ok: false,
-      reason: `${msg}. Set SLACK_LEAVE_CHANNEL_ID, invite the bot to that channel, and ensure manager Slack ID is correct.`,
+      reason: `${msg}. Manager must use /leave once so the bot can DM them, or approve via the admin panel.`,
     };
   }
 }
@@ -207,15 +208,39 @@ export async function notifyEmployeeLeaveRejected(
   );
 }
 
-export async function updateManagerSlackMessage(requestId: string, text: string) {
+/**
+ * After approve/reject: update manager's private DM, or delete any old public channel message.
+ * Never post approve/reject status to a channel everyone can see.
+ */
+export async function finalizeManagerLeaveRequest(requestId: string, text: string) {
   const request = await prisma.leaveRequest.findUnique({ where: { id: requestId } });
   if (!request?.slackChannelId || !request.slackMessageTs) return;
 
   const client = getSlackClient();
-  await client.chat.update({
-    channel: request.slackChannelId,
-    ts: request.slackMessageTs,
-    text,
-    blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
-  });
+
+  if (isPublicSlackChannel(request.slackChannelId)) {
+    try {
+      await client.chat.delete({
+        channel: request.slackChannelId,
+        ts: request.slackMessageTs,
+      });
+    } catch (e) {
+      logger.warn({ err: e, requestId }, "Could not delete public leave approval message");
+    }
+    return;
+  }
+
+  try {
+    await client.chat.update({
+      channel: request.slackChannelId,
+      ts: request.slackMessageTs,
+      text,
+      blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
+    });
+  } catch (e) {
+    logger.warn({ err: e, requestId }, "Could not update manager DM after leave action");
+  }
 }
+
+/** @deprecated Use finalizeManagerLeaveRequest */
+export const updateManagerSlackMessage = finalizeManagerLeaveRequest;

@@ -5,7 +5,7 @@ import { isAdmin } from "@/lib/rbac";
 import { approveLeaveRequest, LeaveValidationError } from "@/lib/leave/service";
 import {
   notifyEmployeeLeaveApproved,
-  updateManagerSlackMessage,
+  finalizeManagerLeaveRequest,
 } from "@/lib/slack/notifications";
 import { formatDateRange } from "@/lib/utils";
 import { logger } from "@/lib/logger";
@@ -35,7 +35,7 @@ export async function POST(_req: NextRequest, ctx: Ctx) {
     });
 
     try {
-      await updateManagerSlackMessage(
+      await finalizeManagerLeaveRequest(
         result.request.id,
         `✅ *APPROVED* by ${user.name}\n${result.request.employee.name} — ${result.request.leaveType.name} (${formatDateRange(result.request.startDate, result.request.endDate)})`
       );

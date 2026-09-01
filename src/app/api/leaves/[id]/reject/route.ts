@@ -6,7 +6,7 @@ import { isAdmin } from "@/lib/rbac";
 import { rejectLeaveRequest, LeaveValidationError } from "@/lib/leave/service";
 import {
   notifyEmployeeLeaveRejected,
-  updateManagerSlackMessage,
+  finalizeManagerLeaveRequest,
 } from "@/lib/slack/notifications";
 import { logger } from "@/lib/logger";
 
@@ -38,7 +38,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     });
 
     try {
-      await updateManagerSlackMessage(
+      await finalizeManagerLeaveRequest(
         result.request.id,
         `❌ *REJECTED* by ${user.name}\n${result.request.employee.name} — ${result.request.leaveType.name}`
       );
