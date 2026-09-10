@@ -17,10 +17,11 @@ async function main() {
     create: { name: "Human Resources" },
   });
 
+  // Remaining-year allocations (~4 months / 1 quarter left)
   const leaveTypes = [
-    { code: "CASUAL", name: "Casual Leave", allocation: 12 },
-    { code: "SICK", name: "Sick Leave", allocation: 12 },
-    { code: "ANNUAL", name: "Annual Leave", allocation: 15 },
+    { code: "CASUAL", name: "Casual Leave", allocation: 3 },
+    { code: "SICK", name: "Sick Leave", allocation: 3 },
+    { code: "ANNUAL", name: "Annual Leave", allocation: 4 },
     {
       code: "MENSTRUATION",
       name: "Menstruation Leave",

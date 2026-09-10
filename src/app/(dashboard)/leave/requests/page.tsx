@@ -32,11 +32,13 @@ export default function RequestsPage() {
   const [rejectId, setRejectId] = useState<string | null>(null);
   const [reason, setReason] = useState("");
   const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
 
   async function load() {
     const q = status ? `?status=${status}` : "";
     const res = await fetch(`/api/leaves${q}`);
-    setRows(await res.json());
+    const data = await res.json();
+    setRows(Array.isArray(data) ? data : []);
   }
 
   useEffect(() => {
@@ -60,6 +62,25 @@ export default function RequestsPage() {
     load();
   }
 
+  async function clearRequestsAndResetBalances() {
+    if (
+      !confirm(
+        "Delete ALL leave requests and reset balances?\n\n" +
+          "Annual 4 · Casual 3 · Sick 3 · Menstruation 1/month\n\n" +
+          "Employees stay. This cannot be undone."
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    const res = await fetch("/api/admin/reset-leave-data", { method: "POST" });
+    const data = await res.json();
+    setBusy(false);
+    setMessage(res.ok ? data.message : data.error || "Failed");
+    if (res.ok) load();
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-4">
@@ -67,17 +88,27 @@ export default function RequestsPage() {
           <h1 className="text-2xl font-bold">Leave Requests</h1>
           <p className="text-slate-500">Approve, reject, or cancel leave</p>
         </div>
-        <select
-          className="h-10 rounded-md border border-slate-200 px-3 text-sm"
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
-        >
-          <option value="">All statuses</option>
-          <option value="PENDING">Pending</option>
-          <option value="APPROVED">Approved</option>
-          <option value="REJECTED">Rejected</option>
-          <option value="CANCELLED">Cancelled</option>
-        </select>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="destructive"
+            size="sm"
+            disabled={busy}
+            onClick={clearRequestsAndResetBalances}
+          >
+            {busy ? "Working…" : "Clear all requests & reset balances"}
+          </Button>
+          <select
+            className="h-10 rounded-md border border-slate-200 px-3 text-sm"
+            value={status}
+            onChange={(e) => setStatus(e.target.value)}
+          >
+            <option value="">All statuses</option>
+            <option value="PENDING">Pending</option>
+            <option value="APPROVED">Approved</option>
+            <option value="REJECTED">Rejected</option>
+            <option value="CANCELLED">Cancelled</option>
+          </select>
+        </div>
       </div>
 
       {message && <p className="text-sm text-slate-600">{message}</p>}

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 type Balance = {
@@ -17,18 +18,61 @@ type Balance = {
 
 export default function BalancesPage() {
   const [rows, setRows] = useState<Balance[]>([]);
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function load() {
+    const data = await fetch("/api/leave-balances").then((r) => r.json());
+    setRows(Array.isArray(data) ? data : []);
+  }
+
   useEffect(() => {
-    fetch("/api/leave-balances")
-      .then((r) => r.json())
-      .then(setRows);
+    load();
   }, []);
+
+  async function applyRemainingYearBalances() {
+    if (
+      !confirm(
+        "Clear ALL leave requests and reset balances for every employee?\n\n" +
+          "New balances (this year):\n" +
+          "• Annual Leave: 4\n" +
+          "• Casual Leave: 3\n" +
+          "• Sick Leave: 3\n" +
+          "• Menstruation: 1 per month (eligible only)\n\n" +
+          "Employees are NOT deleted."
+      )
+    ) {
+      return;
+    }
+    if (!confirm("Are you sure? All current leave requests will be permanently deleted.")) {
+      return;
+    }
+
+    setBusy(true);
+    setMessage("");
+    const res = await fetch("/api/admin/reset-leave-data", { method: "POST" });
+    const data = await res.json();
+    setBusy(false);
+    setMessage(res.ok ? data.message : data.error || "Failed");
+    if (res.ok) load();
+  }
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold">Leave Balances</h1>
-        <p className="text-slate-500">Remaining = Allocated + Carry Forward − Used − Pending</p>
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold">Leave Balances</h1>
+          <p className="text-slate-500">
+            Remaining = Allocated + Carry Forward − Used − Pending
+          </p>
+        </div>
+        <Button variant="destructive" disabled={busy} onClick={applyRemainingYearBalances}>
+          {busy ? "Working…" : "Clear requests & set remaining-year balances"}
+        </Button>
       </div>
+
+      {message && <p className="text-sm text-slate-600">{message}</p>}
+
       <Card>
         <CardHeader>
           <CardTitle>Balances</CardTitle>
