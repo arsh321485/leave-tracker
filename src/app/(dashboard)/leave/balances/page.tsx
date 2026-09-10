@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
@@ -12,23 +12,50 @@ type Balance = {
   pending: number;
   carryForward: number;
   remaining: number;
-  employee: { name: string };
+  employee: { id?: string; name: string };
+  employeeId?: string;
   leaveType: { name: string };
 };
 
+type EmployeeOption = { id: string; name: string };
+
 export default function BalancesPage() {
   const [rows, setRows] = useState<Balance[]>([]);
+  const [employees, setEmployees] = useState<EmployeeOption[]>([]);
+  const [employeeId, setEmployeeId] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
+  async function loadEmployees() {
+    const data = await fetch("/api/employees?status=ACTIVE").then((r) => r.json());
+    if (Array.isArray(data)) {
+      setEmployees(data.map((e: { id: string; name: string }) => ({ id: e.id, name: e.name })));
+    }
+  }
+
   async function load() {
-    const data = await fetch("/api/leave-balances").then((r) => r.json());
+    const q = employeeId ? `?employeeId=${encodeURIComponent(employeeId)}` : "";
+    const data = await fetch(`/api/leave-balances${q}`).then((r) => r.json());
     setRows(Array.isArray(data) ? data : []);
   }
 
   useEffect(() => {
-    load();
+    loadEmployees();
   }, []);
+
+  useEffect(() => {
+    load();
+  }, [employeeId]);
+
+  const employeeOptions = useMemo(() => {
+    if (employees.length) return employees;
+    const seen = new Map<string, string>();
+    for (const b of rows) {
+      const id = b.employeeId || b.employee.id;
+      if (id && !seen.has(id)) seen.set(id, b.employee.name);
+    }
+    return [...seen.entries()].map(([id, name]) => ({ id, name }));
+  }, [employees, rows]);
 
   async function applyRemainingYearBalances() {
     if (
@@ -66,9 +93,23 @@ export default function BalancesPage() {
             Remaining = Allocated + Carry Forward − Used − Pending
           </p>
         </div>
-        <Button variant="destructive" disabled={busy} onClick={applyRemainingYearBalances}>
-          {busy ? "Working…" : "Clear requests & set remaining-year balances"}
-        </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            className="h-10 min-w-[200px] rounded-md border border-slate-200 px-3 text-sm"
+            value={employeeId}
+            onChange={(e) => setEmployeeId(e.target.value)}
+          >
+            <option value="">All employees</option>
+            {employeeOptions.map((e) => (
+              <option key={e.id} value={e.id}>
+                {e.name}
+              </option>
+            ))}
+          </select>
+          <Button variant="destructive" disabled={busy} onClick={applyRemainingYearBalances}>
+            {busy ? "Working…" : "Clear requests & set remaining-year balances"}
+          </Button>
+        </div>
       </div>
 
       {message && <p className="text-sm text-slate-600">{message}</p>}
@@ -104,6 +145,14 @@ export default function BalancesPage() {
                   <td className="font-semibold">{b.remaining}</td>
                 </tr>
               ))}
+              {!rows.length && (
+                <tr>
+                  <td colSpan={8} className="py-6 text-center text-slate-500">
+                    No balances found
+                    {employeeId ? " for this employee" : ""}.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </CardContent>

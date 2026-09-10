@@ -19,6 +19,8 @@ type LeaveRequest = {
   approvedBy?: { name: string } | null;
 };
 
+type EmployeeOption = { id: string; name: string };
+
 function statusVariant(s: string) {
   if (s === "APPROVED") return "success" as const;
   if (s === "REJECTED") return "danger" as const;
@@ -28,22 +30,38 @@ function statusVariant(s: string) {
 
 export default function RequestsPage() {
   const [rows, setRows] = useState<LeaveRequest[]>([]);
+  const [employees, setEmployees] = useState<EmployeeOption[]>([]);
   const [status, setStatus] = useState("");
+  const [employeeId, setEmployeeId] = useState("");
   const [rejectId, setRejectId] = useState<string | null>(null);
   const [reason, setReason] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
+  async function loadEmployees() {
+    const data = await fetch("/api/employees?status=ACTIVE").then((r) => r.json());
+    if (Array.isArray(data)) {
+      setEmployees(data.map((e: { id: string; name: string }) => ({ id: e.id, name: e.name })));
+    }
+  }
+
   async function load() {
-    const q = status ? `?status=${status}` : "";
+    const params = new URLSearchParams();
+    if (status) params.set("status", status);
+    if (employeeId) params.set("employeeId", employeeId);
+    const q = params.toString() ? `?${params}` : "";
     const res = await fetch(`/api/leaves${q}`);
     const data = await res.json();
     setRows(Array.isArray(data) ? data : []);
   }
 
   useEffect(() => {
+    loadEmployees();
+  }, []);
+
+  useEffect(() => {
     load();
-  }, [status]);
+  }, [status, employeeId]);
 
   async function act(id: string, action: "approve" | "reject" | "cancel", body?: object) {
     const res = await fetch(`/api/leaves/${id}/${action}`, {
@@ -97,6 +115,18 @@ export default function RequestsPage() {
           >
             {busy ? "Working…" : "Clear all requests & reset balances"}
           </Button>
+          <select
+            className="h-10 min-w-[180px] rounded-md border border-slate-200 px-3 text-sm"
+            value={employeeId}
+            onChange={(e) => setEmployeeId(e.target.value)}
+          >
+            <option value="">All employees</option>
+            {employees.map((e) => (
+              <option key={e.id} value={e.id}>
+                {e.name}
+              </option>
+            ))}
+          </select>
           <select
             className="h-10 rounded-md border border-slate-200 px-3 text-sm"
             value={status}
@@ -181,6 +211,14 @@ export default function RequestsPage() {
                   </td>
                 </tr>
               ))}
+              {!rows.length && (
+                <tr>
+                  <td colSpan={8} className="py-6 text-center text-slate-500">
+                    No requests found
+                    {employeeId || status ? " for the selected filters" : ""}.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </CardContent>

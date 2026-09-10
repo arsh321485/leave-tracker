@@ -16,10 +16,8 @@ import {
   notifyEmployeeLeaveRejected,
   finalizeManagerLeaveRequest,
 } from "@/lib/slack/notifications";
-import {
-  getEmployeeBalancesForDisplay,
-  getEligibleLeaveTypesForEmployee,
-} from "@/lib/leave/balances";
+import { getEmployeeBalancesForDisplay } from "@/lib/leave/balances";
+import { MENSTRUATION_LEAVE_CODE } from "@/lib/leave/constants";
 import { hashPayload, withIdempotency } from "@/lib/idempotency";
 
 export async function resolveEmployeeBySlackUserId(slackUserId: string) {
@@ -96,12 +94,61 @@ export async function handleSlashLeave(payload: {
   });
 }
 
-async function buildApplyLeaveView(employeeId: string) {
-  const types = await getEligibleLeaveTypesForEmployee(employeeId);
+function applyLeaveLoadingView() {
+  return {
+    type: "modal",
+    callback_id: "apply_leave_loading",
+    title: { type: "plain_text", text: "Apply Leave" },
+    close: { type: "plain_text", text: "Cancel" },
+    blocks: [
+      {
+        type: "section",
+        text: { type: "mrkdwn", text: "_Loading leave form…_" },
+      },
+    ],
+  };
+}
 
-  if (!types.length) {
-    throw new Error("No active leave types configured. Ask HR to add leave types.");
+/**
+ * Slack static_select cannot disable options — exhausted types are listed as
+ * unavailable (strikethrough) and omitted from the select.
+ */
+async function buildApplyLeaveView(employeeId: string) {
+  const balances = await getEmployeeBalancesForDisplay(employeeId);
+  const available = balances.filter((b) => b.remaining > 0);
+  const exhausted = balances.filter((b) => b.remaining <= 0);
+
+  if (!balances.length) {
+    return infoModal(
+      "Apply Leave",
+      "No leave types are available for you. Contact HR."
+    );
   }
+
+  if (!available.length) {
+    const list = exhausted
+      .map((b) => `~${b.leaveType.name}~ (0 remaining)`)
+      .join("\n");
+    return infoModal(
+      "Apply Leave",
+      `You have *no remaining leave balance* for any type.\n\n${list}`
+    );
+  }
+
+  const unavailableBlock =
+    exhausted.length > 0
+      ? {
+          type: "section" as const,
+          text: {
+            type: "mrkdwn" as const,
+            text: `*Unavailable (balance used):*\n${exhausted
+              .map((b) => `~${b.leaveType.name}~`)
+              .join("  ·  ")}`,
+          },
+        }
+      : null;
+
+  const hasMenstruation = available.some((b) => b.leaveType.code === "MENSTRUATION");
 
   return {
     type: "modal",
@@ -110,17 +157,32 @@ async function buildApplyLeaveView(employeeId: string) {
     submit: { type: "plain_text", text: "Submit" },
     close: { type: "plain_text", text: "Cancel" },
     blocks: [
+      ...(unavailableBlock ? [unavailableBlock] : []),
       {
         type: "input",
         block_id: "leave_type",
         label: { type: "plain_text", text: "Leave Type" },
+        hint: {
+          type: "plain_text",
+          text: hasMenstruation
+            ? "Menstruation leave: 1 day only (same From & To date)."
+            : "Only leave types with remaining balance are listed.",
+        },
         element: {
           type: "static_select",
           action_id: "leave_type_select",
-          options: types.map((t) => ({
-            text: { type: "plain_text", text: t.name.slice(0, 75) },
-            value: t.id,
-          })),
+          placeholder: { type: "plain_text", text: "Select leave type" },
+          options: available.map((b) => {
+            const suffix =
+              b.leaveType.code === "MENSTRUATION"
+                ? ` · ${b.remaining} left · 1 day max`
+                : ` · ${b.remaining} left`;
+            const label = `${b.leaveType.name}${suffix}`.slice(0, 75);
+            return {
+              text: { type: "plain_text", text: label },
+              value: b.leaveType.id,
+            };
+          }),
         },
       },
       {
@@ -193,26 +255,52 @@ export async function handleModalActionFast(payload: BlockPayload): Promise<{
   const slackUserId = payload.user.id;
 
   if (action.action_id === "apply_leave") {
-    const employee = await resolveEmployeeBySlackUserId(slackUserId);
-    if (!employee || employee.status !== "ACTIVE") {
-      await dmUser(
-        client,
-        slackUserId,
-        "Your Slack account is not mapped to an active employee. Contact HR."
-      );
-      if (fromModal) {
-        await openOrPushView(
-          client,
-          payload.trigger_id,
-          infoModal("Not mapped", "Your Slack account is not mapped to an active employee. Contact HR."),
-          true
-        );
-      }
-      return;
-    }
-    const view = await buildApplyLeaveView(employee.id);
-    await openOrPushView(client, payload.trigger_id, view, fromModal);
-    return;
+    // Open loading modal immediately so Slack's 3s limit is met; fill form in deferred work.
+    const pushed = await openOrPushView(
+      client,
+      payload.trigger_id,
+      applyLeaveLoadingView(),
+      fromModal
+    );
+    const viewId = (pushed as { view?: { id?: string } })?.view?.id;
+
+    return {
+      deferred: async () => {
+        try {
+          const employee = await resolveEmployeeBySlackUserId(slackUserId);
+          if (!employee || employee.status !== "ACTIVE") {
+            const msg =
+              "Your Slack account is not mapped to an active employee. Contact HR.";
+            await dmUser(client, slackUserId, msg);
+            if (viewId) {
+              await client.views.update({
+                view_id: viewId,
+                view: infoModal("Not mapped", msg) as never,
+              });
+            }
+            return;
+          }
+
+          const view = await buildApplyLeaveView(employee.id);
+          if (viewId) {
+            await client.views.update({
+              view_id: viewId,
+              view: view as never,
+            });
+          }
+        } catch (e) {
+          if (viewId) {
+            await client.views.update({
+              view_id: viewId,
+              view: infoModal(
+                "Apply Leave",
+                `Could not open leave form. Please try again.\n_${e instanceof Error ? e.message : "Error"}_`
+              ) as never,
+            });
+          }
+        }
+      },
+    };
   }
 
   if (action.action_id === "reject_leave" && action.value) {
@@ -476,6 +564,21 @@ export async function processViewSubmissionBackground(
         return { ok: false, fieldErrors: { reason: "Reason is required" } };
       }
 
+      // Fast client-side style alert for menstruation (>1 calendar day selected)
+      const leaveType = await prisma.leaveType.findUnique({
+        where: { id: leaveTypeId },
+        include: { policy: true },
+      });
+      if (leaveType?.code === MENSTRUATION_LEAVE_CODE && fromDate !== toDate) {
+        return {
+          ok: false,
+          fieldErrors: {
+            to_date:
+              "Menstruation leave allows only 1 day. Set From and To to the same date.",
+          },
+        };
+      }
+
       try {
         const request = await createLeaveRequest({
           employeeId: employee.id,
@@ -496,6 +599,19 @@ export async function processViewSubmissionBackground(
       } catch (e) {
         const msg =
           e instanceof LeaveValidationError ? e.message : "Could not create leave request.";
+        const lower = msg.toLowerCase();
+        if (
+          leaveType?.code === MENSTRUATION_LEAVE_CODE ||
+          lower.includes("menstruation") ||
+          lower.includes("1 day")
+        ) {
+          return {
+            ok: false,
+            fieldErrors: {
+              to_date: msg.slice(0, 100),
+            },
+          };
+        }
         await dm(`❌ ${msg}`);
         return { ok: false, message: msg };
       }

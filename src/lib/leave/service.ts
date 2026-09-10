@@ -111,8 +111,11 @@ export async function validateLeaveRequest(input: {
 
   if (leaveType.policy?.monthlyQuota != null) {
     if (days > leaveType.policy.monthlyQuota) {
+      const isMenstruation = leaveType.code === "MENSTRUATION";
       throw new LeaveValidationError(
-        `Maximum ${leaveType.policy.monthlyQuota} day(s) per month for ${leaveType.name}.`
+        isMenstruation
+          ? "Menstruation leave allows only 1 day. Please select the same From and To date."
+          : `Maximum ${leaveType.policy.monthlyQuota} day(s) per month for ${leaveType.name}.`
       );
     }
     const monthStart = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
