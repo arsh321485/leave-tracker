@@ -41,64 +41,42 @@ export async function ensureEmployeeBalances(employeeId: string, year = new Date
   }
 }
 
-async function monthlyBalanceRow(
-  employeeId: string,
-  leaveType: { id: string; name: string; code: string },
-  quota: number,
-  refDate = new Date()
-): Promise<BalanceRow> {
-  const monthStart = new Date(Date.UTC(refDate.getUTCFullYear(), refDate.getUTCMonth(), 1));
-  const monthEnd = new Date(Date.UTC(refDate.getUTCFullYear(), refDate.getUTCMonth() + 1, 0));
-
-  const requests = await prisma.leaveRequest.findMany({
-    where: {
-      employeeId,
-      leaveTypeId: leaveType.id,
-      status: { in: [LeaveRequestStatus.APPROVED, LeaveRequestStatus.PENDING] },
-      startDate: { gte: monthStart, lte: monthEnd },
-    },
-  });
-
-  const used = requests
-    .filter((r) => r.status === LeaveRequestStatus.APPROVED)
-    .reduce((s, r) => s + r.days, 0);
-  const pending = requests
-    .filter((r) => r.status === LeaveRequestStatus.PENDING)
-    .reduce((s, r) => s + r.days, 0);
-
-  return {
-    leaveType,
-    allocated: quota,
-    used,
-    pending,
-    remaining: Math.max(0, quota - used - pending),
-    monthly: true,
-  };
-}
-
-/** All active leave types with balances (zeros where unused). */
+/**
+ * Fast read-only balance for Slack (no balance auto-create — that caused 3s timeouts).
+ * Missing rows show policy allocation with 0 used.
+ */
 export async function getEmployeeBalancesForDisplay(
   employeeId: string,
   year = new Date().getFullYear()
 ): Promise<BalanceRow[]> {
-  await ensureEmployeeBalances(employeeId, year);
+  const now = new Date();
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0));
 
-  const types = await prisma.leaveType.findMany({
-    where: activeLeaveTypeWhere(),
-    include: { policy: true },
-    orderBy: { name: "asc" },
-  });
+  const [types, eligibilities, balances, monthRequests] = await Promise.all([
+    prisma.leaveType.findMany({
+      where: activeLeaveTypeWhere(),
+      include: { policy: true },
+      orderBy: { name: "asc" },
+    }),
+    prisma.employeeLeaveEligibility.findMany({
+      where: { employeeId },
+      select: { leaveTypeId: true },
+    }),
+    prisma.leaveBalance.findMany({
+      where: { employeeId, year },
+    }),
+    prisma.leaveRequest.findMany({
+      where: {
+        employeeId,
+        status: { in: [LeaveRequestStatus.APPROVED, LeaveRequestStatus.PENDING] },
+        startDate: { gte: monthStart, lte: monthEnd },
+      },
+      select: { leaveTypeId: true, status: true, days: true },
+    }),
+  ]);
 
-  const eligibilities = await prisma.employeeLeaveEligibility.findMany({
-    where: { employeeId },
-    select: { leaveTypeId: true },
-  });
   const eligibleIds = new Set(eligibilities.map((e) => e.leaveTypeId));
-
-  const balances = await prisma.leaveBalance.findMany({
-    where: { employeeId, year },
-    include: { leaveType: true },
-  });
   const byTypeId = new Map(balances.map((b) => [b.leaveTypeId, b]));
 
   const rows: BalanceRow[] = [];
@@ -107,17 +85,33 @@ export async function getEmployeeBalancesForDisplay(
     if (requiresEligibility && !eligibleIds.has(t.id)) continue;
 
     if (t.policy?.monthlyQuota != null) {
-      rows.push(await monthlyBalanceRow(employeeId, t, t.policy.monthlyQuota));
+      const quota = t.policy.monthlyQuota;
+      const forType = monthRequests.filter((r) => r.leaveTypeId === t.id);
+      const used = forType
+        .filter((r) => r.status === LeaveRequestStatus.APPROVED)
+        .reduce((s, r) => s + r.days, 0);
+      const pending = forType
+        .filter((r) => r.status === LeaveRequestStatus.PENDING)
+        .reduce((s, r) => s + r.days, 0);
+      rows.push({
+        leaveType: { id: t.id, name: t.name, code: t.code },
+        allocated: quota,
+        used,
+        pending,
+        remaining: Math.max(0, quota - used - pending),
+        monthly: true,
+      });
       continue;
     }
 
     const b = byTypeId.get(t.id);
+    const allocated = b?.allocated ?? t.policy?.annualAllocation ?? 0;
     rows.push({
       leaveType: { id: t.id, name: t.name, code: t.code },
-      allocated: b?.allocated ?? t.policy?.annualAllocation ?? 0,
+      allocated,
       used: b?.used ?? 0,
       pending: b?.pending ?? 0,
-      remaining: b ? remainingBalance(b) : (t.policy?.annualAllocation ?? 0),
+      remaining: b ? remainingBalance(b) : allocated,
       monthly: false,
     });
   }
@@ -139,7 +133,5 @@ export async function getEligibleLeaveTypesForEmployee(employeeId: string) {
   ]);
 
   const eligibleIds = new Set(eligibilities.map((e) => e.leaveTypeId));
-  return types.filter(
-    (t) => !t.policy?.requiresEligibility || eligibleIds.has(t.id)
-  );
+  return types.filter((t) => !t.policy?.requiresEligibility || eligibleIds.has(t.id));
 }

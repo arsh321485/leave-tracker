@@ -44,10 +44,20 @@ export async function POST(req: NextRequest) {
     if (payload.type === "block_actions") {
       const actionId = payload.actions?.[0]?.action_id as string | undefined;
 
-      // Menu buttons + reject modal must use trigger_id within 3s
       if (actionId && FAST_ACTIONS.has(actionId)) {
         try {
-          await handleModalActionFast(payload);
+          const result = await handleModalActionFast(payload);
+          if (result?.deferred) {
+            // Start fill immediately; also register after() so Vercel keeps the isolate alive
+            const work = result.deferred();
+            after(async () => {
+              try {
+                await work;
+              } catch (e) {
+                logger.error({ err: e, actionId }, "Deferred modal fill failed");
+              }
+            });
+          }
         } catch (e) {
           logger.error({ err: e, actionId }, "Fast modal action failed");
           try {

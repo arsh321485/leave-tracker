@@ -51,7 +51,7 @@ async function dmUser(client: WebClient, slackUserId: string, text: string) {
   await postSlackMessage(client, slackUserId, { text });
 }
 
-/** From an existing modal use push; otherwise open. */
+/** From an existing modal use push; otherwise open. Returns Slack API result (includes view.id). */
 async function openOrPushView(
   client: WebClient,
   triggerId: string,
@@ -59,10 +59,9 @@ async function openOrPushView(
   fromModal: boolean
 ) {
   if (fromModal) {
-    await client.views.push({ trigger_id: triggerId, view: view as never });
-  } else {
-    await client.views.open({ trigger_id: triggerId, view: view as never });
+    return client.views.push({ trigger_id: triggerId, view: view as never });
   }
+  return client.views.open({ trigger_id: triggerId, view: view as never });
 }
 
 function infoModal(title: string, text: string) {
@@ -181,9 +180,12 @@ type BlockPayload = {
 
 /**
  * Handles menu buttons quickly (within Slack's 3s limit).
- * Buttons inside the Leave Tracker modal must use views.push, not views.open.
+ * Slow actions push a loading modal first, then fill via views.update.
+ * Returns optional deferred work so the HTTP 200 can return immediately.
  */
-export async function handleModalActionFast(payload: BlockPayload) {
+export async function handleModalActionFast(payload: BlockPayload): Promise<{
+  deferred?: () => Promise<void>;
+} | void> {
   const action = payload.actions[0];
   if (!action) return;
 
@@ -191,7 +193,6 @@ export async function handleModalActionFast(payload: BlockPayload) {
   const fromModal = Boolean(payload.view);
   const slackUserId = payload.user.id;
 
-  // Apply leave: resolve employee only for this path (fastest open-modal flow)
   if (action.action_id === "apply_leave") {
     const employee = await resolveEmployeeBySlackUserId(slackUserId);
     if (!employee || employee.status !== "ACTIVE") {
@@ -212,65 +213,6 @@ export async function handleModalActionFast(payload: BlockPayload) {
     }
     const view = await buildApplyLeaveView(employee.id);
     await openOrPushView(client, payload.trigger_id, view, fromModal);
-    return;
-  }
-
-  const employee = await resolveEmployeeBySlackUserId(slackUserId);
-  if (!employee || employee.status !== "ACTIVE") {
-    await dmUser(
-      client,
-      slackUserId,
-      "Your Slack account is not mapped to an active employee. Contact HR."
-    );
-    if (fromModal) {
-      await openOrPushView(
-        client,
-        payload.trigger_id,
-        infoModal("Not mapped", "Your Slack account is not mapped to an active employee. Contact HR."),
-        true
-      );
-    }
-    return;
-  }
-
-  if (action.action_id === "my_balance") {
-    const balances = await getEmployeeBalancesForDisplay(employee.id);
-    const lines = balances.map((b) => {
-      const suffix = b.monthly ? " (this month)" : "";
-      return `*${b.leaveType.name}*${suffix}\nAllocated: ${b.allocated} | Used: ${b.used} | Pending: ${b.pending} | Remaining: ${b.remaining}`;
-    });
-    const text = `🏖️ *MY LEAVE BALANCE*\n\n${lines.join("\n\n") || "No balances found."}`;
-    await openOrPushView(client, payload.trigger_id, infoModal("My Balance", text), fromModal);
-    return;
-  }
-
-  if (action.action_id === "my_history") {
-    const history = await prisma.leaveRequest.findMany({
-      where: { employeeId: employee.id },
-      include: { leaveType: true, approvedBy: true, rejectedBy: true },
-      orderBy: { createdAt: "desc" },
-      take: 20,
-    });
-    const lines = history.map((r) => {
-      const mgr = r.approvedBy?.name || r.rejectedBy?.name || "-";
-      return `*${formatDateRange(r.startDate, r.endDate)}*\n${r.leaveType.name} · ${r.days} day(s) · ${r.status} · ${mgr}`;
-    });
-    const text = `📋 *My Leave History*\n\n${lines.join("\n\n") || "No leave requests yet."}`;
-    await openOrPushView(client, payload.trigger_id, infoModal("Leave History", text), fromModal);
-    return;
-  }
-
-  if (action.action_id === "upcoming_holidays") {
-    const holidays = await prisma.holiday.findMany({
-      where: { status: "ACTIVE", date: { gte: new Date() } },
-      orderBy: { date: "asc" },
-      take: 20,
-    });
-    const lines = holidays.map(
-      (h) => `*${format(h.date, "dd MMM")}*  ${h.name}${h.isOptional ? " _(Optional)_" : ""}`
-    );
-    const text = `🎉 *UPCOMING HOLIDAYS*\n\n${lines.join("\n") || "No upcoming holidays."}`;
-    await openOrPushView(client, payload.trigger_id, infoModal("Holidays", text), fromModal);
     return;
   }
 
@@ -300,6 +242,96 @@ export async function handleModalActionFast(payload: BlockPayload) {
       },
       fromModal
     );
+    return;
+  }
+
+  if (
+    action.action_id === "my_balance" ||
+    action.action_id === "my_history" ||
+    action.action_id === "upcoming_holidays"
+  ) {
+    const titles: Record<string, string> = {
+      my_balance: "My Balance",
+      my_history: "Leave History",
+      upcoming_holidays: "Holidays",
+    };
+    const title = titles[action.action_id] || "Leave Tracker";
+    const pushed = await openOrPushView(
+      client,
+      payload.trigger_id,
+      infoModal(title, "_Loading…_"),
+      fromModal
+    );
+    const viewId = (pushed as { view?: { id?: string } })?.view?.id;
+
+    return {
+      deferred: async () => {
+        try {
+          const employee = await resolveEmployeeBySlackUserId(slackUserId);
+          if (!employee || employee.status !== "ACTIVE") {
+            if (viewId) {
+              await client.views.update({
+                view_id: viewId,
+                view: infoModal(
+                  "Not mapped",
+                  "Your Slack account is not mapped to an active employee. Contact HR."
+                ) as never,
+              });
+            }
+            return;
+          }
+
+          let text = "";
+          if (action.action_id === "my_balance") {
+            const balances = await getEmployeeBalancesForDisplay(employee.id);
+            const lines = balances.map((b) => {
+              const suffix = b.monthly ? " (this month)" : "";
+              return `*${b.leaveType.name}*${suffix}\nAllocated: ${b.allocated} | Used: ${b.used} | Pending: ${b.pending} | Remaining: ${b.remaining}`;
+            });
+            text = `🏖️ *MY LEAVE BALANCE*\n\n${lines.join("\n\n") || "No balances found."}`;
+          } else if (action.action_id === "my_history") {
+            const history = await prisma.leaveRequest.findMany({
+              where: { employeeId: employee.id },
+              include: { leaveType: true, approvedBy: true, rejectedBy: true },
+              orderBy: { createdAt: "desc" },
+              take: 20,
+            });
+            const lines = history.map((r) => {
+              const mgr = r.approvedBy?.name || r.rejectedBy?.name || "-";
+              return `*${formatDateRange(r.startDate, r.endDate)}*\n${r.leaveType.name} · ${r.days} day(s) · ${r.status} · ${mgr}`;
+            });
+            text = `📋 *My Leave History*\n\n${lines.join("\n\n") || "No leave requests yet."}`;
+          } else {
+            const holidays = await prisma.holiday.findMany({
+              where: { status: "ACTIVE", date: { gte: new Date() } },
+              orderBy: { date: "asc" },
+              take: 20,
+            });
+            const lines = holidays.map(
+              (h) => `*${format(h.date, "dd MMM")}*  ${h.name}${h.isOptional ? " _(Optional)_" : ""}`
+            );
+            text = `🎉 *UPCOMING HOLIDAYS*\n\n${lines.join("\n") || "No upcoming holidays."}`;
+          }
+
+          if (viewId) {
+            await client.views.update({
+              view_id: viewId,
+              view: infoModal(title, text) as never,
+            });
+          }
+        } catch (e) {
+          if (viewId) {
+            await client.views.update({
+              view_id: viewId,
+              view: infoModal(
+                title,
+                `Could not load data. Please try again.\n_${e instanceof Error ? e.message : "Error"}_`
+              ) as never,
+            });
+          }
+        }
+      },
+    };
   }
 }
 
