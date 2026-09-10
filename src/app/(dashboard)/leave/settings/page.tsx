@@ -82,7 +82,8 @@ export default function SettingsPage() {
                 ))}
               </select>
               <p className="mt-1 text-xs text-slate-500">
-                Default is <strong>6:00 AM IST</strong>. Change here anytime — no code deploy needed.
+                Default is <strong>6:00 AM IST</strong> (free Vercel Hobby allows one daily cron at this time).
+                Changing the hour only works if you also update the Vercel cron schedule or use a free external cron.
               </p>
             </div>
             <div>

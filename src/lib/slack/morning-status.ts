@@ -137,7 +137,7 @@ export async function sendMorningStatusDigest() {
   }
 }
 
-/** Called hourly by Vercel cron — sends only at the configured IST hour, once per day. */
+/** Called daily by Vercel Hobby cron (once per day) — sends only at the configured IST hour. */
 export async function sendMorningStatusDigestIfScheduled() {
   const targetHour = await getMorningStatusHourIst();
   const { hour, dateKey } = getISTHourAndDate();
