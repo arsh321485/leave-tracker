@@ -24,10 +24,16 @@ import {
 import { hashPayload, withIdempotency } from "@/lib/idempotency";
 
 export async function resolveEmployeeBySlackUserId(slackUserId: string) {
-  return prisma.employee.findUnique({
-    where: { slackUserId },
+  const id = slackUserId?.trim();
+  if (!id) return null;
+  // Slack IDs are case-sensitive; also try uppercase in case of paste/normalization drift
+  const employee = await prisma.employee.findFirst({
+    where: {
+      OR: [{ slackUserId: id }, { slackUserId: id.toUpperCase() }, { slackUserId: id.toLowerCase() }],
+    },
     include: { manager: true },
   });
+  return employee;
 }
 
 export async function postWelcomeToLeaveChannel() {
@@ -374,7 +380,17 @@ type ViewPayload = {
   };
 };
 
-export async function processViewSubmissionBackground(payload: ViewPayload) {
+export type ViewSubmissionResult =
+  | { ok: true; requestId?: string }
+  | { ok: false; fieldErrors?: Record<string, string>; message?: string };
+
+/**
+ * Creates the leave request synchronously so it always appears in the admin panel.
+ * Manager / employee Slack DMs can continue after the modal closes.
+ */
+export async function processViewSubmissionBackground(
+  payload: ViewPayload
+): Promise<ViewSubmissionResult> {
   const key = hashPayload([
     "view",
     payload.view.callback_id,
@@ -383,15 +399,24 @@ export async function processViewSubmissionBackground(payload: ViewPayload) {
     JSON.stringify(payload.view.state.values),
   ]);
 
-  await withIdempotency(key, async () => {
+  const { result } = await withIdempotency(key, async (): Promise<ViewSubmissionResult> => {
     const client = getSlackClient();
     const employee = await resolveEmployeeBySlackUserId(payload.user.id);
 
-    const dm = async (text: string) => dmUser(client, payload.user.id, text);
+    const dm = async (text: string) => {
+      try {
+        await dmUser(client, payload.user.id, text);
+      } catch {
+        /* DM may fail if app messages disabled — leave is still saved */
+      }
+    };
 
     if (!employee || employee.status !== "ACTIVE") {
       await dm("Your Slack account is not mapped to an active employee. Contact HR.");
-      return { ok: false };
+      return {
+        ok: false,
+        message: "Your Slack account is not mapped to an active employee. Contact HR.",
+      };
     }
 
     if (payload.view.callback_id === SLACK_CALLBACKS.APPLY_LEAVE_MODAL) {
@@ -404,35 +429,62 @@ export async function processViewSubmissionBackground(payload: ViewPayload) {
         LeaveDuration.FULL_DAY;
       const reason = values.reason?.reason_input?.value || "";
 
+      if (!leaveTypeId) {
+        return { ok: false, fieldErrors: { leave_type: "Select a leave type" } };
+      }
+      if (!fromDate || !toDate) {
+        return {
+          ok: false,
+          fieldErrors: {
+            ...(!fromDate ? { from_date: "Required" } : {}),
+            ...(!toDate ? { to_date: "Required" } : {}),
+          },
+        };
+      }
+      if (!reason.trim()) {
+        return { ok: false, fieldErrors: { reason: "Reason is required" } };
+      }
+
       try {
         const request = await createLeaveRequest({
           employeeId: employee.id,
-          leaveTypeId: leaveTypeId!,
-          startDate: fromDate!,
-          endDate: toDate!,
+          leaveTypeId,
+          startDate: fromDate,
+          endDate: toDate,
           duration,
           reason,
           actorLabel: employee.name,
         });
 
-        const managerNotify = await notifyManagerOfLeave(request.id);
-        if (managerNotify.ok) {
-          await dm(
-            managerNotify.via === "ephemeral"
-              ? `✅ Leave submitted (${request.days} day(s)). Your manager was notified privately (only they can see it).`
-              : `✅ Leave request submitted (${request.days} day(s)). Your manager was notified on Slack DM.`
-          );
-        } else {
-          await dm(
-            `✅ Leave saved (${request.days} day(s)), but your manager was *not* notified on Slack.\n\nReason: ${managerNotify.reason}\n\nAsk HR to set your manager's Slack User ID on the Employees page.`
-          );
-        }
+        // Notify after save — never block leave creation on Slack DM success
+        void (async () => {
+          try {
+            const managerNotify = await notifyManagerOfLeave(request.id);
+            if (managerNotify.ok) {
+              await dm(
+                managerNotify.via === "ephemeral"
+                  ? `✅ Leave submitted (${request.days} day(s)). Your manager was notified privately.`
+                  : `✅ Leave request submitted (${request.days} day(s)). Your manager was notified on Slack DM.`
+              );
+            } else {
+              await dm(
+                `✅ Leave saved (${request.days} day(s)) and is in the admin Requests list.\n\n⚠️ Manager was *not* notified on Slack.\nReason: ${managerNotify.reason}`
+              );
+            }
+          } catch (e) {
+            await dm(
+              `✅ Leave saved (${request.days} day(s)) in the admin panel. Slack notify failed — ask HR to check manager Slack ID.`
+            );
+          }
+        })();
+
+        return { ok: true, requestId: request.id };
       } catch (e) {
         const msg =
           e instanceof LeaveValidationError ? e.message : "Could not create leave request.";
         await dm(`❌ ${msg}`);
+        return { ok: false, message: msg };
       }
-      return { ok: true };
     }
 
     if (payload.view.callback_id === SLACK_CALLBACKS.REJECT_LEAVE_MODAL) {
@@ -454,10 +506,13 @@ export async function processViewSubmissionBackground(payload: ViewPayload) {
       } catch (e) {
         const msg = e instanceof LeaveValidationError ? e.message : "Rejection failed.";
         await dm(`❌ ${msg}`);
+        return { ok: false, message: msg };
       }
       return { ok: true };
     }
 
     return { ok: true };
   });
+
+  return result;
 }

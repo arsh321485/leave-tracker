@@ -75,13 +75,36 @@ export async function POST(req: NextRequest) {
     }
 
     if (payload.type === "view_submission") {
-      after(async () => {
-        try {
-          await processViewSubmissionBackground(payload);
-        } catch (e) {
-          logger.error({ err: e }, "Background view submission failed");
+      // CRITICAL: await leave creation so it always hits the DB / admin Requests.
+      // Do NOT rely only on after() — that can be dropped on cold serverless exits.
+      try {
+        const result = await processViewSubmissionBackground(payload);
+        if (!result.ok) {
+          if (result.fieldErrors) {
+            return NextResponse.json({
+              response_action: "errors",
+              errors: result.fieldErrors,
+            });
+          }
+          // Keep modal open with a clear message when possible
+          if (result.message) {
+            return NextResponse.json({
+              response_action: "errors",
+              errors: {
+                reason: result.message.slice(0, 100),
+              },
+            });
+          }
         }
-      });
+      } catch (e) {
+        logger.error({ err: e }, "View submission failed");
+        return NextResponse.json({
+          response_action: "errors",
+          errors: {
+            reason: "Something went wrong. Please try again.",
+          },
+        });
+      }
       return NextResponse.json({ response_action: "clear" });
     }
   } catch (e) {
