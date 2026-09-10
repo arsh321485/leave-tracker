@@ -62,6 +62,10 @@ enum AuditAction {
   EMPLOYEE_UPDATED
   LEAVE_TYPE_UPDATED
   OPTIONAL_HOLIDAY_SELECTED
+  COMP_OFF_CREATED
+  COMP_OFF_APPROVED
+  COMP_OFF_REJECTED
+  COMP_OFF_CANCELLED
 }
 
 model User {
@@ -113,6 +117,9 @@ model Employee {
   approvedRequests         LeaveRequest[] @relation("LeaveApprover")
   rejectedRequests         LeaveRequest[] @relation("LeaveRejector")
   holidaysCreated          Holiday[]      @relation("HolidayCreator")
+  compOffCredits           CompOffCredit[] @relation("CompOffEmployee")
+  approvedCompOffs         CompOffCredit[] @relation("CompOffApprover")
+  rejectedCompOffs         CompOffCredit[] @relation("CompOffRejector")
 
   @@index([managerId])
   @@index([slackUserId])
@@ -217,6 +224,32 @@ model LeaveRequest {
   @@index([status])
   @@index([startDate, endDate])
   @@index([leaveTypeId])
+}
+
+/** Credit request: employee worked extra (e.g. Saturday) → manager approves → Comp Off balance increases */
+model CompOffCredit {
+  id              String             @id @default(cuid())
+  employeeId      String
+  employee        Employee           @relation("CompOffEmployee", fields: [employeeId], references: [id])
+  workDate        DateTime           @db.Date
+  days            Float
+  reason          String
+  status          LeaveRequestStatus @default(PENDING)
+  approvedById    String?
+  approvedBy      Employee?          @relation("CompOffApprover", fields: [approvedById], references: [id])
+  approvedAt      DateTime?
+  rejectedById    String?
+  rejectedBy      Employee?          @relation("CompOffRejector", fields: [rejectedById], references: [id])
+  rejectedAt      DateTime?
+  rejectionReason String?
+  slackMessageTs  String?
+  slackChannelId  String?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  @@index([employeeId])
+  @@index([status])
+  @@index([workDate])
 }
 
 model Holiday {

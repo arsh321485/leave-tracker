@@ -7,6 +7,7 @@ import { writeAuditLog } from "@/lib/audit";
 import {
   REMAINING_YEAR_ALLOCATIONS,
   MENSTRUATION_LEAVE_CODE,
+  COMP_OFF_LEAVE_CODE,
   activeLeaveTypeWhere,
 } from "@/lib/leave/constants";
 
@@ -16,6 +17,7 @@ import {
  *
  * Allocations (remaining ~4 months):
  * - Annual: 4, Casual: 3, Sick: 3
+ * - Comp Off: 0 (earned via credit requests)
  * - Menstruation: 1/month (policy; no yearly balance row)
  */
 export async function POST() {
@@ -27,6 +29,7 @@ export async function POST() {
   try {
     const result = await prisma.$transaction(async (tx) => {
       const deletedRequests = await tx.leaveRequest.deleteMany();
+      const deletedCompOff = await tx.compOffCredit.deleteMany();
       await tx.optionalHolidaySelection.deleteMany();
       await tx.slackIdempotency.deleteMany();
 
@@ -42,6 +45,19 @@ export async function POST() {
           await tx.leavePolicy.update({
             where: { id: lt.policy.id },
             data: { annualAllocation: remaining },
+          });
+        }
+        if (lt.code === COMP_OFF_LEAVE_CODE && lt.policy) {
+          await tx.leavePolicy.update({
+            where: { id: lt.policy.id },
+            data: {
+              annualAllocation: 0,
+              requiresManagerApproval: true,
+              allowHalfDay: true,
+              monthlyQuota: null,
+              expiresMonthly: false,
+              requiresEligibility: false,
+            },
           });
         }
         if (lt.code === MENSTRUATION_LEAVE_CODE && lt.policy) {
@@ -66,17 +82,21 @@ export async function POST() {
       });
 
       const yearlyTypes = leaveTypes.filter(
-        (t) => t.code !== MENSTRUATION_LEAVE_CODE && REMAINING_YEAR_ALLOCATIONS[t.code] != null
+        (t) =>
+          t.code !== MENSTRUATION_LEAVE_CODE &&
+          (REMAINING_YEAR_ALLOCATIONS[t.code] != null || t.code === COMP_OFF_LEAVE_CODE)
       );
 
       const balanceRows = [];
       for (const emp of employees) {
         for (const t of yearlyTypes) {
+          const allocated =
+            t.code === COMP_OFF_LEAVE_CODE ? 0 : REMAINING_YEAR_ALLOCATIONS[t.code]!;
           balanceRows.push({
             employeeId: emp.id,
             leaveTypeId: t.id,
             year,
-            allocated: REMAINING_YEAR_ALLOCATIONS[t.code]!,
+            allocated,
             used: 0,
             pending: 0,
             carryForward: 0,
@@ -90,6 +110,7 @@ export async function POST() {
 
       return {
         deletedRequests: deletedRequests.count,
+        deletedCompOffCredits: deletedCompOff.count,
         employeesUpdated: employees.length,
         balancesCreated: balanceRows.length,
       };
@@ -115,10 +136,11 @@ export async function POST() {
       year,
       allocations: {
         ...REMAINING_YEAR_ALLOCATIONS,
+        COMP_OFF: "0 (earned via Comp Off credit requests)",
         MENSTRUATION: "1 per month (eligible employees only)",
       },
       ...result,
-      message: `Cleared ${result.deletedRequests} leave request(s). Assigned balances for ${result.employeesUpdated} employee(s): Annual 4, Casual 3, Sick 3. Menstruation remains 1/month for eligible staff.`,
+      message: `Cleared ${result.deletedRequests} leave request(s) and ${result.deletedCompOffCredits} Comp Off credit(s). Assigned balances for ${result.employeesUpdated} employee(s): Annual 4, Casual 3, Sick 3, Comp Off 0. Menstruation remains 1/month for eligible staff.`,
     });
   } catch (e) {
     logger.error({ err: e }, "Clear requests / apply balances failed");

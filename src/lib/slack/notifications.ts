@@ -1,8 +1,9 @@
 import type { KnownBlock } from "@slack/web-api";
+import { format } from "date-fns";
 import { prisma } from "@/lib/prisma";
 import { remainingBalance, formatDateRange } from "@/lib/utils";
 import { getSlackClient, postSlackMessage, slackErrorCode } from "@/lib/slack/client";
-import { managerApprovalBlocks } from "@/lib/slack/blocks";
+import { managerApprovalBlocks, managerCompOffApprovalBlocks } from "@/lib/slack/blocks";
 import { logger } from "@/lib/logger";
 import { isPublicSlackChannel, normalizeSlackId } from "@/lib/slack/ids";
 
@@ -124,6 +125,61 @@ export async function notifyManagerOfLeave(requestId: string): Promise<NotifyRes
   }
 }
 
+export async function notifyManagerOfCompOff(creditId: string): Promise<NotifyResult> {
+  const credit = await prisma.compOffCredit.findUnique({
+    where: { id: creditId },
+    include: { employee: { include: { manager: true } } },
+  });
+
+  if (!credit) return { ok: false, reason: "Comp Off request not found" };
+
+  const manager = credit.employee.manager;
+  if (!manager) {
+    return {
+      ok: false,
+      reason: `No manager assigned to ${credit.employee.name}. Set a manager on the Employees page.`,
+    };
+  }
+
+  const managerSlackId = normalizeSlackId(manager.slackUserId);
+  if (!managerSlackId) {
+    return {
+      ok: false,
+      reason: `Manager "${manager.name}" has no Slack User ID. Edit them on Employees and link Slack.`,
+    };
+  }
+
+  const blocks = managerCompOffApprovalBlocks({
+    creditId: credit.id,
+    employeeName: credit.employee.name,
+    workDate: format(credit.workDate, "dd MMM yyyy"),
+    days: credit.days,
+    reason: credit.reason,
+  });
+
+  try {
+    const result = await postManagerLeaveRequestPrivate(
+      managerSlackId,
+      blocks,
+      `Comp Off credit approval — ${credit.employee.name}`
+    );
+
+    await prisma.compOffCredit.update({
+      where: { id: credit.id },
+      data: {
+        slackMessageTs: result.ts || null,
+        slackChannelId: result.channel,
+      },
+    });
+
+    return { ok: true, via: result.via };
+  } catch (err) {
+    const msg = slackErrorMessage(err);
+    logger.error({ err, creditId, managerSlack: managerSlackId }, "Manager Comp Off notify failed");
+    return { ok: false, reason: msg };
+  }
+}
+
 /** Called after leave is saved — must be awaited (e.g. in after()), never fire-and-forget. */
 export async function sendLeaveSubmittedNotifications(
   requestId: string,
@@ -148,6 +204,32 @@ export async function sendLeaveSubmittedNotifications(
 
   const applicantNotify = await dmEmployee(applicantSlackUserId, applicantText);
 
+  return {
+    managerOk: managerNotify.ok,
+    managerReason: managerNotify.ok ? undefined : managerNotify.reason,
+    applicantOk: applicantNotify.ok,
+  };
+}
+
+export async function sendCompOffSubmittedNotifications(
+  creditId: string,
+  applicantSlackUserId: string
+): Promise<{ managerOk: boolean; managerReason?: string; applicantOk: boolean }> {
+  const credit = await prisma.compOffCredit.findUnique({ where: { id: creditId } });
+  if (!credit) {
+    return { managerOk: false, managerReason: "Request not found", applicantOk: false };
+  }
+
+  const managerNotify = await notifyManagerOfCompOff(creditId);
+
+  let applicantText: string;
+  if (managerNotify.ok) {
+    applicantText = `✅ Comp Off credit requested (${credit.days} day(s)) for work on ${format(credit.workDate, "dd MMM yyyy")}.\n\nYour manager was notified. After approval, Comp Off will appear in your balance and you can apply it like other leave.`;
+  } else {
+    applicantText = `✅ Comp Off credit saved (${credit.days} day(s)) — it appears in the admin Comp Off list.\n\n⚠️ Your manager was *not* notified on Slack.\nReason: ${managerNotify.reason}`;
+  }
+
+  const applicantNotify = await dmEmployee(applicantSlackUserId, applicantText);
   return {
     managerOk: managerNotify.ok,
     managerReason: managerNotify.ok ? undefined : managerNotify.reason,
@@ -209,6 +291,49 @@ export async function notifyEmployeeLeaveRejected(
   );
 }
 
+export async function notifyEmployeeCompOffApproved(
+  creditId: string,
+  approverName: string
+): Promise<NotifyResult> {
+  const credit = await prisma.compOffCredit.findUnique({
+    where: { id: creditId },
+    include: { employee: true },
+  });
+  if (!credit?.employee.slackUserId) {
+    return {
+      ok: false,
+      reason: `${credit?.employee.name ?? "Employee"} has no Slack User ID mapped`,
+    };
+  }
+
+  return dmEmployee(
+    credit.employee.slackUserId,
+    `✅ *COMP OFF APPROVED*\n\n*+${credit.days} day(s)* added to your Comp Off balance.\n*Work date:* ${format(credit.workDate, "dd MMM yyyy")}\n*Approved by:* ${approverName}\n\nYou can now apply Comp Off leave from Apply Leave.`
+  );
+}
+
+export async function notifyEmployeeCompOffRejected(
+  creditId: string,
+  rejectorName: string,
+  reason: string
+): Promise<NotifyResult> {
+  const credit = await prisma.compOffCredit.findUnique({
+    where: { id: creditId },
+    include: { employee: true },
+  });
+  if (!credit?.employee.slackUserId) {
+    return {
+      ok: false,
+      reason: `${credit?.employee.name ?? "Employee"} has no Slack User ID mapped`,
+    };
+  }
+
+  return dmEmployee(
+    credit.employee.slackUserId,
+    `❌ *COMP OFF REJECTED*\n\n*Work date:* ${format(credit.workDate, "dd MMM yyyy")}\n*Reason:* ${reason}\n*Rejected by:* ${rejectorName}`
+  );
+}
+
 export async function finalizeManagerLeaveRequest(requestId: string, text: string) {
   const request = await prisma.leaveRequest.findUnique({ where: { id: requestId } });
   if (!request?.slackChannelId || !request.slackMessageTs) return;
@@ -236,6 +361,23 @@ export async function finalizeManagerLeaveRequest(requestId: string, text: strin
     });
   } catch (e) {
     logger.warn({ err: e, requestId }, "Could not update manager DM after leave action");
+  }
+}
+
+export async function finalizeManagerCompOffRequest(creditId: string, text: string) {
+  const credit = await prisma.compOffCredit.findUnique({ where: { id: creditId } });
+  if (!credit?.slackChannelId || !credit.slackMessageTs) return;
+
+  const client = getSlackClient();
+  try {
+    await client.chat.update({
+      channel: credit.slackChannelId,
+      ts: credit.slackMessageTs,
+      text,
+      blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
+    });
+  } catch (e) {
+    logger.warn({ err: e, creditId }, "Could not update manager DM after Comp Off action");
   }
 }
 

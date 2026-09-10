@@ -6,7 +6,7 @@ import {
   handleModalActionFast,
   processViewSubmissionBackground,
 } from "@/lib/slack/handlers";
-import { sendLeaveSubmittedNotifications } from "@/lib/slack/notifications";
+import { sendLeaveSubmittedNotifications, sendCompOffSubmittedNotifications } from "@/lib/slack/notifications";
 import { rateLimit } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
 
@@ -15,7 +15,9 @@ export const maxDuration = 30;
 
 const FAST_ACTIONS = new Set([
   "apply_leave",
+  "request_comp_off",
   "reject_leave",
+  "reject_comp_off",
   "my_balance",
   "my_history",
   "upcoming_holidays",
@@ -91,12 +93,23 @@ export async function POST(req: NextRequest) {
       after(async () => {
         try {
           const result = await work;
-          if (result.ok && result.requestId && result.applicantSlackUserId) {
-            const notify = await sendLeaveSubmittedNotifications(
-              result.requestId,
-              result.applicantSlackUserId
-            );
-            logger.info({ requestId: result.requestId, notify }, "Leave submit Slack notify done");
+          if (result.ok && result.applicantSlackUserId) {
+            if (result.compOffCreditId) {
+              const notify = await sendCompOffSubmittedNotifications(
+                result.compOffCreditId,
+                result.applicantSlackUserId
+              );
+              logger.info(
+                { creditId: result.compOffCreditId, notify },
+                "Comp Off submit Slack notify done"
+              );
+            } else if (result.requestId) {
+              const notify = await sendLeaveSubmittedNotifications(
+                result.requestId,
+                result.applicantSlackUserId
+              );
+              logger.info({ requestId: result.requestId, notify }, "Leave submit Slack notify done");
+            }
           }
         } catch (e) {
           logger.error({ err: e }, "View submission / notify failed");

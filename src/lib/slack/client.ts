@@ -156,16 +156,21 @@ export async function openDmChannel(_client: WebClient, slackUserId: string) {
 
 export const SLACK_ACTIONS = {
   APPLY_LEAVE: "apply_leave",
+  REQUEST_COMP_OFF: "request_comp_off",
   MY_BALANCE: "my_balance",
   MY_HISTORY: "my_history",
   UPCOMING_HOLIDAYS: "upcoming_holidays",
   APPROVE_LEAVE: "approve_leave",
   REJECT_LEAVE: "reject_leave",
   REJECT_LEAVE_SUBMIT: "reject_leave_submit",
+  APPROVE_COMP_OFF: "approve_comp_off",
+  REJECT_COMP_OFF: "reject_comp_off",
 } as const;
 
 export const SLACK_CALLBACKS = {
   APPLY_LEAVE_MODAL: "apply_leave_modal",
+  COMP_OFF_CREDIT_MODAL: "comp_off_credit_modal",
   REJECT_LEAVE_MODAL: "reject_leave_modal",
+  REJECT_COMP_OFF_MODAL: "reject_comp_off_modal",
   LEAVE_HOME: "leave_home",
 } as const;

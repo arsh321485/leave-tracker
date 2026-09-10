@@ -6,10 +6,10 @@ export const REMAINING_YEAR_ALLOCATIONS: Record<string, number> = {
 };
 
 export const MENSTRUATION_LEAVE_CODE = "MENSTRUATION";
+export const COMP_OFF_LEAVE_CODE = "COMP_OFF";
 
 /** Leave types removed from active use (kept in DB for old records). */
 export const REMOVED_LEAVE_TYPE_CODES = [
-  "COMP_OFF",
   "HALF_DAY",
   "EARNED",
   "UNPAID",

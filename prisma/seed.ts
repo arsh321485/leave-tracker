@@ -23,6 +23,11 @@ async function main() {
     { code: "SICK", name: "Sick Leave", allocation: 3 },
     { code: "ANNUAL", name: "Annual Leave", allocation: 4 },
     {
+      code: "COMP_OFF",
+      name: "Comp Off",
+      allocation: 0, // earned via credit requests, not yearly grant
+    },
+    {
       code: "MENSTRUATION",
       name: "Menstruation Leave",
       allocation: 0,
@@ -49,6 +54,7 @@ async function main() {
         expiresMonthly: lt.expiresMonthly ?? false,
         requiresEligibility: lt.requiresEligibility ?? false,
         maxConsecutiveDays: lt.maxDays ?? (lt.code === "CASUAL" ? 5 : 15),
+        carryForwardEnabled: lt.code === "ANNUAL",
       },
       create: {
         leaveTypeId: type.id,
@@ -68,7 +74,7 @@ async function main() {
 
   await prisma.leaveType.updateMany({
     where: {
-      code: { in: ["COMP_OFF", "HALF_DAY", "EARNED", "UNPAID", "OPTIONAL"] },
+      code: { in: ["HALF_DAY", "EARNED", "UNPAID", "OPTIONAL"] },
     },
     data: { isActive: false },
   });

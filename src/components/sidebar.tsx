@@ -10,6 +10,7 @@ import type { Role } from "@prisma/client";
 const links: { href: string; label: string; roles?: Role[] }[] = [
   { href: "/leave/dashboard", label: "Dashboard" },
   { href: "/leave/requests", label: "Requests" },
+  { href: "/leave/comp-off", label: "Comp Off" },
   { href: "/leave/employees", label: "Employees", roles: ["SUPER_ADMIN", "HR_ADMIN"] },
   { href: "/leave/balances", label: "Balances" },
   { href: "/leave/holidays", label: "Holidays", roles: ["SUPER_ADMIN", "HR_ADMIN"] },

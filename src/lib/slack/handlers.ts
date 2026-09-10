@@ -9,12 +9,20 @@ import {
   rejectLeaveRequest,
   LeaveValidationError,
 } from "@/lib/leave/service";
+import {
+  createCompOffCredit,
+  approveCompOffCredit,
+  rejectCompOffCredit,
+} from "@/lib/leave/comp-off";
 import { leaveHomeBlocks, welcomeBlocks } from "@/lib/slack/blocks";
 import { getSlackClient, postSlackMessage, SLACK_CALLBACKS } from "@/lib/slack/client";
 import {
   notifyEmployeeLeaveApproved,
   notifyEmployeeLeaveRejected,
+  notifyEmployeeCompOffApproved,
+  notifyEmployeeCompOffRejected,
   finalizeManagerLeaveRequest,
+  finalizeManagerCompOffRequest,
 } from "@/lib/slack/notifications";
 import { getEmployeeBalancesForDisplay } from "@/lib/leave/balances";
 import { MENSTRUATION_LEAVE_CODE } from "@/lib/leave/constants";
@@ -104,6 +112,58 @@ function applyLeaveLoadingView() {
       {
         type: "section",
         text: { type: "mrkdwn", text: "_Loading leave form…_" },
+      },
+    ],
+  };
+}
+
+function buildCompOffCreditView() {
+  return {
+    type: "modal",
+    callback_id: SLACK_CALLBACKS.COMP_OFF_CREDIT_MODAL,
+    title: { type: "plain_text", text: "Request Comp Off" },
+    submit: { type: "plain_text", text: "Submit" },
+    close: { type: "plain_text", text: "Cancel" },
+    blocks: [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: "Request credit for *extra work* (e.g. Saturday). After your manager approves, days are added to your Comp Off balance — then apply Comp Off leave like any other leave.",
+        },
+      },
+      {
+        type: "input",
+        block_id: "work_date",
+        label: { type: "plain_text", text: "Work Date (day you worked)" },
+        element: { type: "datepicker", action_id: "work_date" },
+      },
+      {
+        type: "input",
+        block_id: "duration",
+        label: { type: "plain_text", text: "Credit Duration" },
+        element: {
+          type: "static_select",
+          action_id: "duration_select",
+          initial_option: {
+            text: { type: "plain_text", text: "Full Day (1.0)" },
+            value: "FULL_DAY",
+          },
+          options: [
+            { text: { type: "plain_text", text: "Full Day (1.0)" }, value: "FULL_DAY" },
+            { text: { type: "plain_text", text: "Half Day (0.5)" }, value: "HALF_DAY" },
+          ],
+        },
+      },
+      {
+        type: "input",
+        block_id: "reason",
+        label: { type: "plain_text", text: "Reason / work done" },
+        element: {
+          type: "plain_text_input",
+          action_id: "reason_input",
+          multiline: true,
+        },
       },
     ],
   };
@@ -303,6 +363,11 @@ export async function handleModalActionFast(payload: BlockPayload): Promise<{
     };
   }
 
+  if (action.action_id === "request_comp_off") {
+    await openOrPushView(client, payload.trigger_id, buildCompOffCreditView(), fromModal);
+    return;
+  }
+
   if (action.action_id === "reject_leave" && action.value) {
     await openOrPushView(
       client,
@@ -313,6 +378,35 @@ export async function handleModalActionFast(payload: BlockPayload): Promise<{
         private_metadata: action.value,
         title: { type: "plain_text", text: "Reject Leave" },
         submit: { type: "plain_text", text: "Reject Leave" },
+        close: { type: "plain_text", text: "Cancel" },
+        blocks: [
+          {
+            type: "input",
+            block_id: "rejection_reason",
+            label: { type: "plain_text", text: "Reason for rejection" },
+            element: {
+              type: "plain_text_input",
+              action_id: "rejection_reason_input",
+              multiline: true,
+            },
+          },
+        ],
+      },
+      fromModal
+    );
+    return;
+  }
+
+  if (action.action_id === "reject_comp_off" && action.value) {
+    await openOrPushView(
+      client,
+      payload.trigger_id,
+      {
+        type: "modal",
+        callback_id: SLACK_CALLBACKS.REJECT_COMP_OFF_MODAL,
+        private_metadata: action.value,
+        title: { type: "plain_text", text: "Reject Comp Off" },
+        submit: { type: "plain_text", text: "Reject" },
         close: { type: "plain_text", text: "Cancel" },
         blocks: [
           {
@@ -430,7 +524,9 @@ export async function handleBlockActions(payload: BlockPayload) {
   // Menu / modal actions handled on the fast path
   if (
     action.action_id === "apply_leave" ||
+    action.action_id === "request_comp_off" ||
     action.action_id === "reject_leave" ||
+    action.action_id === "reject_comp_off" ||
     action.action_id === "my_balance" ||
     action.action_id === "my_history" ||
     action.action_id === "upcoming_holidays"
@@ -478,6 +574,25 @@ export async function handleBlockActions(payload: BlockPayload) {
       return { ok: true };
     }
 
+    if (action.action_id === "approve_comp_off" && action.value) {
+      try {
+        const credit = await approveCompOffCredit({
+          creditId: action.value,
+          approverEmployeeId: employee.id,
+          actorLabel: employee.name,
+        });
+        await finalizeManagerCompOffRequest(
+          credit.id,
+          `✅ *COMP OFF APPROVED* by ${employee.name}\n${credit.employee.name} — +${credit.days} day(s) for ${format(credit.workDate, "dd MMM yyyy")}`
+        );
+        await notifyEmployeeCompOffApproved(credit.id, employee.name);
+      } catch (e) {
+        const msg = e instanceof LeaveValidationError ? e.message : "Comp Off approval failed";
+        await dmUser(client, payload.user.id, msg);
+      }
+      return { ok: true };
+    }
+
     return { ok: true };
   });
 }
@@ -500,7 +615,12 @@ type ViewPayload = {
 };
 
 export type ViewSubmissionResult =
-  | { ok: true; requestId?: string; applicantSlackUserId?: string }
+  | {
+      ok: true;
+      requestId?: string;
+      compOffCreditId?: string;
+      applicantSlackUserId?: string;
+    }
   | { ok: false; fieldErrors?: Record<string, string>; message?: string };
 
 /**
@@ -617,6 +737,42 @@ export async function processViewSubmissionBackground(
       }
     }
 
+    if (payload.view.callback_id === SLACK_CALLBACKS.COMP_OFF_CREDIT_MODAL) {
+      const values = payload.view.state.values;
+      const workDate = values.work_date?.work_date?.selected_date;
+      const duration =
+        (values.duration?.duration_select?.selected_option?.value as LeaveDuration) ||
+        LeaveDuration.FULL_DAY;
+      const reason = values.reason?.reason_input?.value || "";
+
+      if (!workDate) {
+        return { ok: false, fieldErrors: { work_date: "Select the date you worked" } };
+      }
+      if (!reason.trim()) {
+        return { ok: false, fieldErrors: { reason: "Reason is required" } };
+      }
+
+      try {
+        const credit = await createCompOffCredit({
+          employeeId: employee.id,
+          workDate,
+          duration,
+          reason,
+          actorLabel: employee.name,
+        });
+        return {
+          ok: true,
+          compOffCreditId: credit.id,
+          applicantSlackUserId: payload.user.id,
+        };
+      } catch (e) {
+        const msg =
+          e instanceof LeaveValidationError ? e.message : "Could not create Comp Off request.";
+        await dm(`❌ ${msg}`);
+        return { ok: false, message: msg };
+      }
+    }
+
     if (payload.view.callback_id === SLACK_CALLBACKS.REJECT_LEAVE_MODAL) {
       const requestId = payload.view.private_metadata!;
       const reason =
@@ -633,6 +789,30 @@ export async function processViewSubmissionBackground(
           `❌ *REJECTED* by ${employee.name}\n${request.employee.name} — ${request.leaveType.name}`
         );
         await notifyEmployeeLeaveRejected(request.id, employee.name, reason);
+      } catch (e) {
+        const msg = e instanceof LeaveValidationError ? e.message : "Rejection failed.";
+        await dm(`❌ ${msg}`);
+        return { ok: false, message: msg };
+      }
+      return { ok: true };
+    }
+
+    if (payload.view.callback_id === SLACK_CALLBACKS.REJECT_COMP_OFF_MODAL) {
+      const creditId = payload.view.private_metadata!;
+      const reason =
+        payload.view.state.values.rejection_reason?.rejection_reason_input?.value || "";
+      try {
+        const credit = await rejectCompOffCredit({
+          creditId,
+          rejectorEmployeeId: employee.id,
+          reason,
+          actorLabel: employee.name,
+        });
+        await finalizeManagerCompOffRequest(
+          credit.id,
+          `❌ *COMP OFF REJECTED* by ${employee.name}\n${credit.employee.name} — ${format(credit.workDate, "dd MMM yyyy")}`
+        );
+        await notifyEmployeeCompOffRejected(credit.id, employee.name, reason);
       } catch (e) {
         const msg = e instanceof LeaveValidationError ? e.message : "Rejection failed.";
         await dm(`❌ ${msg}`);
