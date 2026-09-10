@@ -40,28 +40,40 @@ export function slackErrorCode(err: unknown): string | undefined {
   if (err && typeof err === "object" && "data" in err) {
     return (err as { data?: { error?: string } }).data?.error;
   }
+  if (err instanceof Error) {
+    const m = err.message.match(/(\w+_disabled|channel_not_found|not_in_channel|invalid_auth|missing_scope)/);
+    return m?.[1];
+  }
   return undefined;
 }
 
-/** Find an existing bot↔user DM channel (created when user ran /leave). */
 async function findExistingDmChannel(client: WebClient, userId: string): Promise<string | null> {
-  let cursor: string | undefined;
-  do {
-    const res = await client.conversations.list({
-      types: "im",
-      limit: 200,
-      cursor,
-      exclude_archived: true,
-    });
-    for (const ch of res.channels || []) {
-      if (ch.user === userId && ch.id) return ch.id;
-    }
-    cursor = res.response_metadata?.next_cursor || undefined;
-  } while (cursor);
+  try {
+    let cursor: string | undefined;
+    do {
+      const res = await client.conversations.list({
+        types: "im",
+        limit: 200,
+        cursor,
+        exclude_archived: true,
+      });
+      for (const ch of res.channels || []) {
+        if (ch.user === userId && ch.id) return ch.id;
+      }
+      cursor = res.response_metadata?.next_cursor || undefined;
+    } while (cursor);
+  } catch (e) {
+    logger.warn({ err: e, userId }, "conversations.list(im) failed — need im:read scope?");
+  }
   return null;
 }
 
-/** Post to a user DM (U…) or channel (C…). Retries via existing IM channel when direct post fails. */
+/**
+ * Reliable DM / channel post for bots:
+ * 1) Channel ID (C/G) → post directly
+ * 2) User ID (U) → conversations.open → post to DM channel (D…)
+ * Fallbacks if App Home Messages tab / open fails.
+ */
 export async function postSlackMessage(
   client: WebClient,
   recipient: string,
@@ -83,31 +95,58 @@ export async function postSlackMessage(
     };
   }
 
-  try {
-    return await send(target);
-  } catch (first) {
-    const code = slackErrorCode(first);
+  // Public / private channels — post directly
+  if (/^[CG]/i.test(target)) {
+    return send(target);
+  }
 
-    if (isSlackUserId(target)) {
-      const dmChannel = await findExistingDmChannel(client, target);
-      if (dmChannel) {
-        logger.info({ userId: target, dmChannel }, "Retrying Slack message via existing DM channel");
-        return await send(dmChannel);
-      }
+  // Already a DM channel id
+  if (/^D/i.test(target)) {
+    return send(target);
+  }
 
-      if (code === "channel_not_found") {
-        try {
-          const opened = await client.conversations.open({ users: target });
-          const ch = opened.channel?.id;
-          if (ch) return await send(ch);
-        } catch (openErr) {
-          logger.warn({ err: openErr, target }, "conversations.open failed");
-        }
+  // User ID — open (or reuse) a DM conversation, then post
+  if (isSlackUserId(target)) {
+    const errors: string[] = [];
+
+    try {
+      const opened = await client.conversations.open({ users: target });
+      const dmId = opened.channel?.id;
+      if (dmId) {
+        return await send(dmId);
       }
+      errors.push("conversations.open returned no channel");
+    } catch (openErr) {
+      const code = slackErrorCode(openErr) || "open_failed";
+      errors.push(`conversations.open: ${code}`);
+      logger.warn({ err: openErr, target, code }, "conversations.open failed");
     }
 
-    throw first;
+    try {
+      const existing = await findExistingDmChannel(client, target);
+      if (existing) {
+        return await send(existing);
+      }
+    } catch (listErr) {
+      errors.push(`im_list: ${slackErrorCode(listErr) || "failed"}`);
+    }
+
+    try {
+      return await send(target);
+    } catch (postErr) {
+      const code = slackErrorCode(postErr) || "post_failed";
+      errors.push(`chat.postMessage: ${code}`);
+      const hint =
+        code === "messages_tab_disabled" || errors.some((e) => e.includes("messages_tab_disabled"))
+          ? " Enable App Home → Messages Tab in your Slack app settings, reinstall the app, then have the user open the Leave Tracker app once."
+          : code === "missing_scope"
+            ? " Add bot scopes chat:write, im:write, im:read and reinstall the app."
+            : "";
+      throw new Error(`Cannot DM ${target} (${errors.join("; ")}).${hint}`);
+    }
   }
+
+  return send(target);
 }
 
 /** @deprecated Use postSlackMessage */

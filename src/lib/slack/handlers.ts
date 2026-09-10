@@ -12,7 +12,6 @@ import {
 import { leaveHomeBlocks, welcomeBlocks } from "@/lib/slack/blocks";
 import { getSlackClient, postSlackMessage, SLACK_CALLBACKS } from "@/lib/slack/client";
 import {
-  notifyManagerOfLeave,
   notifyEmployeeLeaveApproved,
   notifyEmployeeLeaveRejected,
   finalizeManagerLeaveRequest,
@@ -413,7 +412,7 @@ type ViewPayload = {
 };
 
 export type ViewSubmissionResult =
-  | { ok: true; requestId?: string }
+  | { ok: true; requestId?: string; applicantSlackUserId?: string }
   | { ok: false; fieldErrors?: Record<string, string>; message?: string };
 
 /**
@@ -488,29 +487,12 @@ export async function processViewSubmissionBackground(
           actorLabel: employee.name,
         });
 
-        // Notify after save — never block leave creation on Slack DM success
-        void (async () => {
-          try {
-            const managerNotify = await notifyManagerOfLeave(request.id);
-            if (managerNotify.ok) {
-              await dm(
-                managerNotify.via === "ephemeral"
-                  ? `✅ Leave submitted (${request.days} day(s)). Your manager was notified privately.`
-                  : `✅ Leave request submitted (${request.days} day(s)). Your manager was notified on Slack DM.`
-              );
-            } else {
-              await dm(
-                `✅ Leave saved (${request.days} day(s)) and is in the admin Requests list.\n\n⚠️ Manager was *not* notified on Slack.\nReason: ${managerNotify.reason}`
-              );
-            }
-          } catch {
-            await dm(
-              `✅ Leave saved (${request.days} day(s)) in the admin panel. Slack notify failed — ask HR to check manager Slack ID.`
-            );
-          }
-        })();
-
-        return { ok: true, requestId: request.id };
+        // Notifications must run in route after() — never void/fire-and-forget (Vercel kills them)
+        return {
+          ok: true,
+          requestId: request.id,
+          applicantSlackUserId: payload.user.id,
+        };
       } catch (e) {
         const msg =
           e instanceof LeaveValidationError ? e.message : "Could not create leave request.";

@@ -6,6 +6,7 @@ import {
   handleModalActionFast,
   processViewSubmissionBackground,
 } from "@/lib/slack/handlers";
+import { sendLeaveSubmittedNotifications } from "@/lib/slack/notifications";
 import { rateLimit } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
 
@@ -84,16 +85,21 @@ export async function POST(req: NextRequest) {
     }
 
     if (payload.type === "view_submission") {
-      // Slack requires a response within 3s. Cold starts + DB often take longer,
-      // which caused "We had some trouble connecting" until the 2nd/3rd try.
-      // Strategy: start save immediately, ack within ~1.8s, finish in after().
+      // Save leave quickly; DMs must run inside after() or Vercel kills them.
       const work = processViewSubmissionBackground(payload);
 
       after(async () => {
         try {
-          await work;
+          const result = await work;
+          if (result.ok && result.requestId && result.applicantSlackUserId) {
+            const notify = await sendLeaveSubmittedNotifications(
+              result.requestId,
+              result.applicantSlackUserId
+            );
+            logger.info({ requestId: result.requestId, notify }, "Leave submit Slack notify done");
+          }
         } catch (e) {
-          logger.error({ err: e }, "View submission background failed");
+          logger.error({ err: e }, "View submission / notify failed");
         }
       });
 
@@ -121,7 +127,6 @@ export async function POST(req: NextRequest) {
         }
       } catch (e) {
         logger.error({ err: e }, "View submission failed early");
-        // Still clear — after() continues; user gets DM with result/error
       }
 
       return NextResponse.json({ response_action: "clear" });

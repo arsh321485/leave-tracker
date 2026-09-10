@@ -189,12 +189,21 @@ Local Slack testing needs an HTTPS tunnel (ngrok/cloudflared) pointing at your m
 - `commands`
 - `chat:write`
 - `im:write`
+- `im:read`
 - `im:history`
-- `chat:write.public` (optional; for posting to public channels)
 - `users:read`
 - `users:read.email`
 - `channels:read`
 - `channels:join` (optional if you invite the bot manually)
+
+### App Home (required for personal DMs)
+
+1. Slack App → **App Home**
+2. Enable **Messages Tab**
+3. **Reinstall** the app to the workspace
+4. Each user should open the Leave Tracker app once or run `/leave`
+
+Without Messages Tab enabled, Slack returns `messages_tab_disabled` and DMs never arrive.
 
 ---
 

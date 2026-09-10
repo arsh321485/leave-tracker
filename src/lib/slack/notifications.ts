@@ -5,7 +5,6 @@ import { getSlackClient, postSlackMessage, slackErrorCode } from "@/lib/slack/cl
 import { managerApprovalBlocks } from "@/lib/slack/blocks";
 import { logger } from "@/lib/logger";
 import { isPublicSlackChannel, normalizeSlackId } from "@/lib/slack/ids";
-import { getAppSetting, SETTING_MORNING_STATUS_SLACK_ID } from "@/lib/slack/morning-status";
 
 export type NotifyResult =
   | { ok: true; via?: "dm" | "ephemeral" }
@@ -37,41 +36,15 @@ export async function dmEmployee(
   }
 }
 
-/** Manager-only: DM first, then ephemeral (visible only to manager, not the whole channel). */
 async function postManagerLeaveRequestPrivate(
   managerSlackUserId: string,
   blocks: KnownBlock[],
   text: string
-): Promise<{ channel: string; ts: string; via: "dm" | "ephemeral" }> {
+): Promise<{ channel: string; ts: string; via: "dm" }> {
   const managerId = normalizeSlackId(managerSlackUserId)!;
   const client = getSlackClient();
-
-  try {
-    const result = await postSlackMessage(client, managerId, { text, blocks });
-    return { ...result, via: "dm" };
-  } catch (dmErr) {
-    logger.warn({ err: dmErr, managerId }, "Manager DM failed, trying ephemeral");
-
-    const settingsChannel = normalizeSlackId(
-      await getAppSetting(SETTING_MORNING_STATUS_SLACK_ID)
-    );
-    const leaveChannel =
-      process.env.SLACK_LEAVE_CHANNEL_ID?.trim() ||
-      (settingsChannel && isPublicSlackChannel(settingsChannel) ? settingsChannel : null);
-
-    if (!leaveChannel) {
-      throw dmErr;
-    }
-
-    await client.chat.postEphemeral({
-      channel: leaveChannel,
-      user: managerId,
-      text,
-      blocks,
-    });
-
-    return { channel: leaveChannel, ts: "", via: "ephemeral" };
-  }
+  const result = await postSlackMessage(client, managerId, { text, blocks });
+  return { ...result, via: "dm" };
 }
 
 export async function notifyManagerOfLeave(requestId: string): Promise<NotifyResult> {
@@ -99,7 +72,7 @@ export async function notifyManagerOfLeave(requestId: string): Promise<NotifyRes
   if (!managerSlackId) {
     return {
       ok: false,
-      reason: `Manager "${manager.name}" has no Slack User ID. Edit them on Employees and link via Slack sync.`,
+      reason: `Manager "${manager.name}" has no Slack User ID. Edit them on Employees and link Slack.`,
     };
   }
 
@@ -135,23 +108,51 @@ export async function notifyManagerOfLeave(requestId: string): Promise<NotifyRes
       where: { id: request.id },
       data: {
         slackMessageTs: result.ts || null,
-        slackChannelId: result.via === "dm" ? result.channel : null,
+        slackChannelId: result.channel,
       },
     });
 
     logger.info(
       { requestId, managerId: manager.id, managerSlack: managerSlackId, via: result.via },
-      "Manager notified privately on Slack"
+      "Manager notified on Slack DM"
     );
     return { ok: true, via: result.via };
   } catch (err) {
     const msg = slackErrorMessage(err);
     logger.error({ err, requestId, managerSlack: managerSlackId }, "Manager Slack notify failed");
-    return {
-      ok: false,
-      reason: `${msg}. Manager must use /leave once so the bot can DM them, or approve via the admin panel.`,
-    };
+    return { ok: false, reason: msg };
   }
+}
+
+/** Called after leave is saved — must be awaited (e.g. in after()), never fire-and-forget. */
+export async function sendLeaveSubmittedNotifications(
+  requestId: string,
+  applicantSlackUserId: string
+): Promise<{ managerOk: boolean; managerReason?: string; applicantOk: boolean }> {
+  const request = await prisma.leaveRequest.findUnique({
+    where: { id: requestId },
+    include: { leaveType: true },
+  });
+  if (!request) {
+    return { managerOk: false, managerReason: "Request not found", applicantOk: false };
+  }
+
+  const managerNotify = await notifyManagerOfLeave(requestId);
+
+  let applicantText: string;
+  if (managerNotify.ok) {
+    applicantText = `✅ Leave request submitted (${request.days} day(s)).\n\n*Leave:* ${request.leaveType.name}\n*Dates:* ${formatDateRange(request.startDate, request.endDate)}\n\nYour manager was notified on Slack DM.`;
+  } else {
+    applicantText = `✅ Leave saved (${request.days} day(s)) — it appears in the admin Requests list.\n\n⚠️ Your manager was *not* notified on Slack.\nReason: ${managerNotify.reason}`;
+  }
+
+  const applicantNotify = await dmEmployee(applicantSlackUserId, applicantText);
+
+  return {
+    managerOk: managerNotify.ok,
+    managerReason: managerNotify.ok ? undefined : managerNotify.reason,
+    applicantOk: applicantNotify.ok,
+  };
 }
 
 export async function notifyEmployeeLeaveApproved(
@@ -208,10 +209,6 @@ export async function notifyEmployeeLeaveRejected(
   );
 }
 
-/**
- * After approve/reject: update manager's private DM, or delete any old public channel message.
- * Never post approve/reject status to a channel everyone can see.
- */
 export async function finalizeManagerLeaveRequest(requestId: string, text: string) {
   const request = await prisma.leaveRequest.findUnique({ where: { id: requestId } });
   if (!request?.slackChannelId || !request.slackMessageTs) return;
@@ -242,5 +239,4 @@ export async function finalizeManagerLeaveRequest(requestId: string, text: strin
   }
 }
 
-/** @deprecated Use finalizeManagerLeaveRequest */
 export const updateManagerSlackMessage = finalizeManagerLeaveRequest;

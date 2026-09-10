@@ -20,6 +20,7 @@ const HOUR_OPTIONS = Array.from({ length: 24 }, (_, h) => ({
 export default function SettingsPage() {
   const [morningStatusSlackId, setMorningStatusSlackId] = useState("");
   const [morningStatusHourIst, setMorningStatusHourIst] = useState(6);
+  const [testDmUserId, setTestDmUserId] = useState("");
   const [message, setMessage] = useState("");
 
   async function load() {
@@ -50,9 +51,19 @@ export default function SettingsPage() {
     const data = await res.json();
     setMessage(
       res.ok
-        ? `Test sent — ${data.working} working, ${data.onLeave} on leave`
+        ? `Channel test sent — ${data.working} working, ${data.onLeave} on leave`
         : data.error || "Send failed"
     );
+  }
+
+  async function sendTestDm() {
+    const res = await fetch("/api/settings/test-dm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slackUserId: testDmUserId }),
+    });
+    const data = await res.json();
+    setMessage(res.ok ? `Test DM sent to ${data.slackUserId}` : data.error || "DM failed");
   }
 
   return (
@@ -61,6 +72,35 @@ export default function SettingsPage() {
         <h1 className="text-2xl font-bold">Slack Settings</h1>
         <p className="text-slate-500">Configure automated Slack notifications</p>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Test personal DM</CardTitle>
+        </CardHeader>
+        <CardContent className="max-w-xl space-y-3">
+          <p className="text-sm text-slate-500">
+            Paste a user&apos;s Slack ID (U…) — e.g. Arsh or Rohit from Employees page — and send a
+            test DM. If this fails, leave approve/apply DMs will also fail until Slack app settings
+            are fixed.
+          </p>
+          <div>
+            <Label>Slack User ID</Label>
+            <Input
+              value={testDmUserId}
+              onChange={(e) => setTestDmUserId(e.target.value)}
+              placeholder="U0XXXXXXXX"
+            />
+          </div>
+          <Button type="button" onClick={sendTestDm} disabled={!testDmUserId.trim()}>
+            Send test DM
+          </Button>
+          <p className="text-xs text-amber-700">
+            If you see <code>messages_tab_disabled</code>: Slack App → App Home → turn on{" "}
+            <strong>Messages Tab</strong> → Reinstall app to workspace. Then open the Leave Tracker
+            app in Slack once (or run <code>/leave</code>).
+          </p>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
@@ -82,26 +122,24 @@ export default function SettingsPage() {
                 ))}
               </select>
               <p className="mt-1 text-xs text-slate-500">
-                Default is <strong>6:00 AM IST</strong> (free Vercel Hobby allows one daily cron at this time).
-                Changing the hour only works if you also update the Vercel cron schedule or use a free external cron.
+                Default is <strong>6:00 AM IST</strong> (free Vercel Hobby: one daily cron).
               </p>
             </div>
             <div>
-              <Label>Slack User or Channel ID</Label>
+              <Label>Slack Channel ID</Label>
               <Input
                 value={morningStatusSlackId}
                 onChange={(e) => setMorningStatusSlackId(e.target.value)}
-                placeholder="C01234567 (channel recommended)"
+                placeholder="C01234567"
               />
               <p className="mt-1 text-xs text-slate-500">
-                Paste your <strong>channel ID</strong> (starts with C) — e.g. your #team-status channel.
-                Invite the bot: <code>/invite @Leave Tracker</code>
+                Channel ID (C…) only — invite bot with <code>/invite @Leave Tracker</code>
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
               <Button type="submit">Save</Button>
               <Button type="button" variant="outline" onClick={sendTest}>
-                Send test now
+                Send channel test
               </Button>
             </div>
           </form>
