@@ -503,7 +503,7 @@ export async function processViewSubmissionBackground(
                 `✅ Leave saved (${request.days} day(s)) and is in the admin Requests list.\n\n⚠️ Manager was *not* notified on Slack.\nReason: ${managerNotify.reason}`
               );
             }
-          } catch (e) {
+          } catch {
             await dm(
               `✅ Leave saved (${request.days} day(s)) in the admin panel. Slack notify failed — ask HR to check manager Slack ID.`
             );

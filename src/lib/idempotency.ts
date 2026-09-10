@@ -4,8 +4,8 @@ import { prisma } from "@/lib/prisma";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Runs fn once per key. Concurrent callers wait for the first result.
- * Never silently skips work (that caused Slack leave applies to vanish).
+ * Runs fn once per key. Concurrent callers wait briefly for the first result.
+ * Never silently skips work forever (that caused Slack leave applies to vanish).
  */
 export async function withIdempotency<T>(
   key: string,
@@ -21,16 +21,30 @@ export async function withIdempotency<T>(
     await prisma.slackIdempotency.create({ data: { key } });
     claimed = true;
   } catch {
-    // Another request holds the key — wait for its response
-    for (let i = 0; i < 20; i++) {
-      await sleep(250);
+    // Slack often retries when cold start is slow — wait briefly for the first attempt
+    for (let i = 0; i < 8; i++) {
+      await sleep(200);
       const again = await prisma.slackIdempotency.findUnique({ where: { key } });
       if (again?.response != null) {
         return { result: again.response as T, replayed: true };
       }
     }
-    // Timed out waiting — run ourselves to avoid losing the leave request
-    claimed = false;
+
+    const stale = await prisma.slackIdempotency.findUnique({ where: { key } });
+    const ageMs = stale ? Date.now() - new Date(stale.createdAt).getTime() : 0;
+    // If the first attempt died mid-flight, reclaim after 15s
+    if (stale && ageMs > 15_000) {
+      await prisma.slackIdempotency.delete({ where: { key } }).catch(() => undefined);
+      try {
+        await prisma.slackIdempotency.create({ data: { key } });
+        claimed = true;
+      } catch {
+        return { result: { ok: true, inFlight: true } as T, replayed: true };
+      }
+    } else {
+      // First attempt still running — don't create a duplicate leave
+      return { result: { ok: true, inFlight: true } as T, replayed: true };
+    }
   }
 
   try {
@@ -49,7 +63,6 @@ export async function withIdempotency<T>(
     }
     return { result, replayed: false };
   } catch (e) {
-    // Allow retry on failure — remove empty claim so next attempt can run
     if (claimed) {
       await prisma.slackIdempotency.delete({ where: { key } }).catch(() => undefined);
     }

@@ -48,7 +48,6 @@ export async function POST(req: NextRequest) {
         try {
           const result = await handleModalActionFast(payload);
           if (result?.deferred) {
-            // Start fill immediately; also register after() so Vercel keeps the isolate alive
             const work = result.deferred();
             after(async () => {
               try {
@@ -85,36 +84,46 @@ export async function POST(req: NextRequest) {
     }
 
     if (payload.type === "view_submission") {
-      // CRITICAL: await leave creation so it always hits the DB / admin Requests.
-      // Do NOT rely only on after() — that can be dropped on cold serverless exits.
+      // Slack requires a response within 3s. Cold starts + DB often take longer,
+      // which caused "We had some trouble connecting" until the 2nd/3rd try.
+      // Strategy: start save immediately, ack within ~1.8s, finish in after().
+      const work = processViewSubmissionBackground(payload);
+
+      after(async () => {
+        try {
+          await work;
+        } catch (e) {
+          logger.error({ err: e }, "View submission background failed");
+        }
+      });
+
       try {
-        const result = await processViewSubmissionBackground(payload);
-        if (!result.ok) {
-          if (result.fieldErrors) {
+        const outcome = await Promise.race([
+          work.then((r) => ({ type: "done" as const, r })),
+          new Promise<{ type: "slow" }>((resolve) =>
+            setTimeout(() => resolve({ type: "slow" }), 1800)
+          ),
+        ]);
+
+        if (outcome.type === "done" && !outcome.r.ok) {
+          if (outcome.r.fieldErrors) {
             return NextResponse.json({
               response_action: "errors",
-              errors: result.fieldErrors,
+              errors: outcome.r.fieldErrors,
             });
           }
-          // Keep modal open with a clear message when possible
-          if (result.message) {
+          if (outcome.r.message) {
             return NextResponse.json({
               response_action: "errors",
-              errors: {
-                reason: result.message.slice(0, 100),
-              },
+              errors: { reason: outcome.r.message.slice(0, 100) },
             });
           }
         }
       } catch (e) {
-        logger.error({ err: e }, "View submission failed");
-        return NextResponse.json({
-          response_action: "errors",
-          errors: {
-            reason: "Something went wrong. Please try again.",
-          },
-        });
+        logger.error({ err: e }, "View submission failed early");
+        // Still clear — after() continues; user gets DM with result/error
       }
+
       return NextResponse.json({ response_action: "clear" });
     }
   } catch (e) {
