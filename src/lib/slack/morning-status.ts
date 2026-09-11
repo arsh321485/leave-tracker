@@ -203,12 +203,15 @@ export async function sendFridayUpcomingHolidaysDigest() {
     orderBy: { date: "asc" },
   });
 
-  const lines = holidays.length
-    ? holidays.map((h) => {
-        const d = format(h.date, "EEE, dd MMM");
-        return `• *${d}* — ${h.name} _(${h.type === "PUBLIC" ? "Public" : "Festival"})_`;
-      })
-    : ["• _No public or festival holidays next week_"];
+  // No message when there are no upcoming public/festival holidays
+  if (!holidays.length) {
+    return { ok: true, skipped: true, count: 0, range: week.rangeLabel, reason: "No holidays next week" };
+  }
+
+  const lines = holidays.map((h) => {
+    const d = format(h.date, "EEE, dd MMM");
+    return `• *${d}* — ${h.name} _(${h.type === "PUBLIC" ? "Public" : "Festival"})_`;
+  });
 
   const text = [
     `🎉 *Upcoming holidays — next week*`,
@@ -286,7 +289,10 @@ export async function sendFridayHolidayDigestIfScheduled() {
 
   const result = await sendFridayUpcomingHolidaysDigest();
   if (result.ok) {
-    await setAppSetting(SETTING_FRIDAY_HOLIDAY_LAST_SENT, dateKey);
+    // Mark sent only when a real message was posted (not when skipped for empty week)
+    if (!("skipped" in result && result.skipped)) {
+      await setAppSetting(SETTING_FRIDAY_HOLIDAY_LAST_SENT, dateKey);
+    }
   }
   return result;
 }

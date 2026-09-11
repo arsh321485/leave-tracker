@@ -61,7 +61,9 @@ export default function SettingsPage() {
     const data = await res.json();
     setMessage(
       res.ok
-        ? `Holiday preview sent (${data.count} holiday(s) for ${data.range})`
+        ? data.skipped
+          ? `No message sent — no public/festival holidays for ${data.range || "next week"}`
+          : `Holiday preview sent (${data.count} holiday(s) for ${data.range})`
         : data.error || "Holiday test failed"
     );
   }
