@@ -56,6 +56,16 @@ export default function SettingsPage() {
     );
   }
 
+  async function sendHolidayTest() {
+    const res = await fetch("/api/settings/test-holidays", { method: "POST" });
+    const data = await res.json();
+    setMessage(
+      res.ok
+        ? `Holiday preview sent (${data.count} holiday(s) for ${data.range})`
+        : data.error || "Holiday test failed"
+    );
+  }
+
   async function sendTestDm() {
     const res = await fetch("/api/settings/test-dm", {
       method: "POST",
@@ -122,7 +132,9 @@ export default function SettingsPage() {
                 ))}
               </select>
               <p className="mt-1 text-xs text-slate-500">
-                Default is <strong>6:00 AM IST</strong> (free Vercel Hobby: one daily cron).
+                Default is <strong>6:00 AM IST</strong>. Vercel Hobby runs one daily cron at{" "}
+                <code>00:30 UTC</code> (= 6:00 AM IST). Set <code>CRON_SECRET</code> in Vercel
+                env vars (Production) or the job will fail with 401.
               </p>
             </div>
             <div>
@@ -136,10 +148,20 @@ export default function SettingsPage() {
                 Channel ID (C…) only — invite bot with <code>/invite @Leave Tracker</code>
               </p>
             </div>
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">
+              <p className="font-medium text-slate-800">Also on Fridays</p>
+              <p className="mt-1">
+                At the same morning run on Fridays, the bot posts{" "}
+                <strong>next week&apos;s public &amp; festival holidays</strong> to this channel.
+              </p>
+            </div>
             <div className="flex flex-wrap gap-2">
               <Button type="submit">Save</Button>
               <Button type="button" variant="outline" onClick={sendTest}>
                 Send channel test
+              </Button>
+              <Button type="button" variant="outline" onClick={sendHolidayTest}>
+                Test Friday holiday msg
               </Button>
             </div>
           </form>

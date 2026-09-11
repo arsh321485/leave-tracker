@@ -15,6 +15,7 @@ export async function middleware(req: NextRequest) {
     pathname.startsWith("/api/slack") ||
     pathname.startsWith("/api/health") ||
     pathname.startsWith("/api/auth") ||
+    pathname.startsWith("/api/cron") ||
     pathname === "/login"
   ) {
     return NextResponse.next();
