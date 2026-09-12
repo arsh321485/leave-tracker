@@ -181,7 +181,7 @@ export async function validateLeaveRequest(input: {
   }
 
   const isPaidPool = input.leaveTypeId === PAID_POOL_SELECT_VALUE;
-  let leaveType = isPaidPool
+  const leaveType = isPaidPool
     ? null
     : await prisma.leaveType.findUnique({
         where: { id: input.leaveTypeId },

@@ -6,17 +6,10 @@ import { requireSession, jsonError } from "@/lib/api";
 import { canViewAllLeaves, isAdmin } from "@/lib/rbac";
 import {
   createCompOffCredit,
-  approveCompOffCredit,
-  rejectCompOffCredit,
-  cancelCompOffCredit,
   ensureCompOffLeaveType,
 } from "@/lib/leave/comp-off";
 import { LeaveValidationError } from "@/lib/leave/service";
-import {
-  notifyManagerOfCompOff,
-  notifyEmployeeCompOffApproved,
-  notifyEmployeeCompOffRejected,
-} from "@/lib/slack/notifications";
+import { notifyManagerOfCompOff } from "@/lib/slack/notifications";
 import { logger } from "@/lib/logger";
 
 const createSchema = z.object({

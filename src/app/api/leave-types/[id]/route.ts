@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { Role, AuditAction } from "@prisma/client";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
-import { requireSession, jsonError } from "@/lib/api";
+import { requireSession } from "@/lib/api";
 import { writeAuditLog } from "@/lib/audit";
 
 type Ctx = { params: Promise<{ id: string }> };

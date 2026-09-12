@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Role } from "@prisma/client";
 import { requireSession, jsonError } from "@/lib/api";
 import { isAdmin } from "@/lib/rbac";
 import { cancelLeaveRequest, LeaveValidationError } from "@/lib/leave/service";

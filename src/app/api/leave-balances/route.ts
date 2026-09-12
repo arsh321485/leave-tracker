@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { requireSession, jsonError } from "@/lib/api";
 import { canViewAllLeaves } from "@/lib/rbac";
