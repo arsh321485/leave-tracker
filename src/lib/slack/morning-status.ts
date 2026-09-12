@@ -5,84 +5,14 @@ import { getSlackClient, postSlackMessage } from "@/lib/slack/client";
 import { isSlackChannelId, normalizeSlackId } from "@/lib/slack/ids";
 import { formatDateRange } from "@/lib/utils";
 import { logger } from "@/lib/logger";
+import { getISTHourAndDate, getISTDayBounds, getNextWeekMonSunIST } from "@/lib/ist";
 
 export const SETTING_MORNING_STATUS_SLACK_ID = "slack_morning_status_recipient";
 export const SETTING_MORNING_STATUS_HOUR_IST = "morning_status_hour_ist";
 export const SETTING_MORNING_STATUS_LAST_SENT = "morning_status_last_sent_date";
 export const SETTING_FRIDAY_HOLIDAY_LAST_SENT = "friday_holiday_digest_last_sent";
 
-export function getISTHourAndDate(now = new Date()) {
-  const formatter = new Intl.DateTimeFormat("en-IN", {
-    timeZone: "Asia/Kolkata",
-    hour: "numeric",
-    hour12: false,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    weekday: "long",
-  });
-  const parts = formatter.formatToParts(now);
-  let hour = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
-  // Some runtimes report midnight as 24
-  if (hour === 24) hour = 0;
-  const year = parts.find((p) => p.type === "year")?.value;
-  const month = parts.find((p) => p.type === "month")?.value;
-  const day = parts.find((p) => p.type === "day")?.value;
-  const weekday = parts.find((p) => p.type === "weekday")?.value;
-  return {
-    hour,
-    dateKey: `${year}-${month}-${day}`,
-    dateLabel: `${weekday}, ${Number(day)} ${formatMonth(Number(month))} ${year}`,
-    weekday: weekday || "",
-  };
-}
-
-function formatMonth(m: number) {
-  return ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][
-    m - 1
-  ];
-}
-
-/** Start/end of "today" in IST for leave overlap checks. */
-function getISTDayBounds(dateKey: string) {
-  const dayStart = new Date(`${dateKey}T00:00:00+05:30`);
-  const dayEnd = new Date(`${dateKey}T23:59:59.999+05:30`);
-  return { dayStart, dayEnd };
-}
-
-/** Next calendar week (Mon–Sun) after the current IST week. */
-export function getNextWeekMonSunIST(now = new Date()) {
-  const { dateKey } = getISTHourAndDate(now);
-  // Noon IST avoids DST-edge issues (IST has none, but keeps date stable)
-  const todayNoon = new Date(`${dateKey}T12:00:00+05:30`);
-  const jsDay = todayNoon.getUTCDay(); // 0 Sun … 6 Sat in terms of the IST calendar day
-  // Days until next Monday (if today is Monday, next Monday is +7)
-  const daysUntilNextMonday = ((8 - jsDay) % 7) || 7;
-  const nextMonday = new Date(todayNoon);
-  nextMonday.setUTCDate(nextMonday.getUTCDate() + daysUntilNextMonday);
-  const nextSunday = new Date(nextMonday);
-  nextSunday.setUTCDate(nextSunday.getUTCDate() + 6);
-
-  const toKey = (d: Date) => {
-    const parts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Kolkata",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-    }).format(d);
-    return parts; // YYYY-MM-DD
-  };
-
-  const startKey = toKey(nextMonday);
-  const endKey = toKey(nextSunday);
-  return {
-    startKey,
-    endKey,
-    start: new Date(`${startKey}T00:00:00+05:30`),
-    end: new Date(`${endKey}T23:59:59.999+05:30`),
-    rangeLabel: `${format(new Date(`${startKey}T12:00:00+05:30`), "dd MMM")} – ${format(new Date(`${endKey}T12:00:00+05:30`), "dd MMM yyyy")}`,
-  };
-}
+export { getISTHourAndDate, getISTDayBounds };
 
 export async function getMorningStatusHourIst() {
   const raw = await getAppSetting(SETTING_MORNING_STATUS_HOUR_IST);

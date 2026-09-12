@@ -1,5 +1,5 @@
 import { leaveDateWindowError, toDateKey, addMonthsDateKey } from "@/lib/leave/date-rules";
-import { getISTHourAndDate } from "@/lib/slack/morning-status";
+import { getISTHourAndDate } from "@/lib/ist";
 
 /** Slack modal field errors must be ≤100 chars and keyed by block_id. */
 export function mapLeaveValidationToFieldErrors(message: string): Record<string, string> {
@@ -12,12 +12,11 @@ export function mapLeaveValidationToFieldErrors(message: string): Record<string,
   if (lower.includes("10:00") || lower.includes("same-day") || lower.includes("same day")) {
     return { from_date: msg || "Same-day leave only before 10:00 AM IST." };
   }
-  if (lower.includes("3 months") || lower.includes("3 month")) {
-    // Prefer To Date when the range ends beyond the window
-    if (lower.includes("until") || lower.includes("ahead")) {
+  if (lower.includes("3 months") || lower.includes("3 month") || lower.includes("too far")) {
+    if (lower.includes("to date")) {
       return { to_date: msg || "Leave cannot be more than 3 months ahead." };
     }
-    return { from_date: msg };
+    return { from_date: msg || "Leave cannot be more than 3 months ahead." };
   }
   if (
     lower.includes("only") &&
@@ -50,13 +49,10 @@ export function mapLeaveValidationToFieldErrors(message: string): Record<string,
     return { leave_type: msg };
   }
 
-  // Always show something on the form so the modal does not silently close
   return { reason: msg || "Could not submit leave. Check your dates and balance." };
 }
 
-/**
- * Fast pre-check before DB create — returns Slack field errors or null.
- */
+/** Instant pre-check — no DB. Use in the Slack route before any slow work. */
 export function quickApplyLeaveFieldErrors(input: {
   fromDate?: string;
   toDate?: string;
@@ -81,7 +77,6 @@ export function quickApplyLeaveFieldErrors(input: {
     return mapLeaveValidationToFieldErrors(dateErr);
   }
 
-  // Extra clarity: if only To date is beyond 3 months
   const { dateKey: today } = getISTHourAndDate();
   const maxKey = addMonthsDateKey(today, 3);
   const endKey = toDateKey(input.toDate);
@@ -92,4 +87,40 @@ export function quickApplyLeaveFieldErrors(input: {
   }
 
   return null;
+}
+
+export function applyLeaveSubmittingView() {
+  return {
+    type: "modal" as const,
+    callback_id: "apply_leave_submitting",
+    title: { type: "plain_text" as const, text: "Apply Leave" },
+    close: { type: "plain_text" as const, text: "Close" },
+    blocks: [
+      {
+        type: "section" as const,
+        text: {
+          type: "mrkdwn" as const,
+          text: ":hourglass_flowing_sand: *Submitting your leave request…*\nPlease wait a moment.",
+        },
+      },
+    ],
+  };
+}
+
+export function applyLeaveResultView(ok: boolean, text: string) {
+  return {
+    type: "modal" as const,
+    callback_id: "apply_leave_result",
+    title: { type: "plain_text" as const, text: ok ? "Leave submitted" : "Could not submit" },
+    close: { type: "plain_text" as const, text: "Close" },
+    blocks: [
+      {
+        type: "section" as const,
+        text: {
+          type: "mrkdwn" as const,
+          text: (ok ? `:white_check_mark: ${text}` : `:x: ${text}`).slice(0, 2900),
+        },
+      },
+    ],
+  };
 }

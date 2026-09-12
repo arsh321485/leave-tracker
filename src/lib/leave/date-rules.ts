@@ -1,27 +1,4 @@
-import { getISTHourAndDate } from "@/lib/slack/morning-status";
-
-/** YYYY-MM-DD from a date string or Date (prefer explicit date-only strings). */
-export function toDateKey(input: string | Date): string {
-  if (typeof input === "string") {
-    const m = input.trim().match(/^(\d{4}-\d{2}-\d{2})/);
-    if (m) return m[1];
-  }
-  const d = typeof input === "string" ? new Date(input) : input;
-  return getISTHourAndDate(d).dateKey;
-}
-
-/** Add calendar months to a YYYY-MM-DD key (IST calendar). */
-export function addMonthsDateKey(dateKey: string, months: number): string {
-  const [y, m, day] = dateKey.split("-").map(Number);
-  const intendedMonthIndex = m - 1 + months;
-  const lastDayOfTarget = new Date(Date.UTC(y, intendedMonthIndex + 1, 0)).getUTCDate();
-  const clampedDay = Math.min(day, lastDayOfTarget);
-  const result = new Date(Date.UTC(y, intendedMonthIndex, clampedDay));
-  const yy = result.getUTCFullYear();
-  const mm = String(result.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(result.getUTCDate()).padStart(2, "0");
-  return `${yy}-${mm}-${dd}`;
-}
+import { getISTHourAndDate, toDateKey, addMonthsDateKey } from "@/lib/ist";
 
 /**
  * Leave date rules (IST). Returns an error message or null if OK.
@@ -60,3 +37,5 @@ export function leaveDateWindowError(
 
   return null;
 }
+
+export { toDateKey, addMonthsDateKey };

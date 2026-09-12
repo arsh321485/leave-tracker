@@ -1,12 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
-import { verifySlackSignature } from "@/lib/slack/client";
+import { verifySlackSignature, getSlackClient, SLACK_CALLBACKS } from "@/lib/slack/client";
 import {
   handleBlockActions,
   handleModalActionFast,
   processViewSubmissionBackground,
 } from "@/lib/slack/handlers";
-import { sendLeaveSubmittedNotifications, sendCompOffSubmittedNotifications } from "@/lib/slack/notifications";
+import {
+  sendLeaveSubmittedNotifications,
+  sendCompOffSubmittedNotifications,
+} from "@/lib/slack/notifications";
+import {
+  quickApplyLeaveFieldErrors,
+  applyLeaveSubmittingView,
+  applyLeaveResultView,
+} from "@/lib/slack/apply-leave-errors";
 import { rateLimit } from "@/lib/rate-limit";
 import { logger } from "@/lib/logger";
 
@@ -63,7 +71,6 @@ export async function POST(req: NextRequest) {
         } catch (e) {
           logger.error({ err: e, actionId }, "Fast modal action failed");
           try {
-            const { getSlackClient } = await import("@/lib/slack/client");
             const client = getSlackClient();
             await client.chat.postMessage({
               channel: payload.user.id,
@@ -87,7 +94,94 @@ export async function POST(req: NextRequest) {
     }
 
     if (payload.type === "view_submission") {
-      // Save leave quickly; DMs must run inside after() or Vercel kills them.
+      const callbackId = payload.view?.callback_id as string | undefined;
+
+      // --- Apply Leave: instant rule check (no DB) so Slack never times out ---
+      if (callbackId === SLACK_CALLBACKS.APPLY_LEAVE_MODAL) {
+        const values = payload.view.state?.values || {};
+        const leaveTypeId = values.leave_type?.leave_type_select?.selected_option?.value;
+        const fromDate = values.from_date?.from_date?.selected_date;
+        const toDate = values.to_date?.to_date?.selected_date;
+        const reason = values.reason?.reason_input?.value || "";
+
+        const early = quickApplyLeaveFieldErrors({
+          leaveTypeId,
+          fromDate,
+          toDate,
+          reason,
+        });
+        if (early) {
+          return NextResponse.json({
+            response_action: "errors",
+            errors: early,
+          });
+        }
+
+        // Dates OK — show loading modal immediately, finish save in background
+        const viewId = payload.view?.id as string | undefined;
+        after(async () => {
+          try {
+            const result = await processViewSubmissionBackground(payload);
+            const client = getSlackClient();
+
+            if (!result.ok) {
+              const errText =
+                result.message ||
+                (result.fieldErrors
+                  ? Object.values(result.fieldErrors).join(" ")
+                  : "Could not submit leave.");
+              if (viewId) {
+                await client.views.update({
+                  view_id: viewId,
+                  view: applyLeaveResultView(false, errText) as never,
+                });
+              }
+              return;
+            }
+
+            if (viewId) {
+              await client.views.update({
+                view_id: viewId,
+                view: applyLeaveResultView(
+                  true,
+                  "Your leave request was submitted. Your manager will be notified."
+                ) as never,
+              });
+            }
+
+            if (result.requestId && result.applicantSlackUserId) {
+              const notify = await sendLeaveSubmittedNotifications(
+                result.requestId,
+                result.applicantSlackUserId
+              );
+              logger.info({ requestId: result.requestId, notify }, "Leave submit Slack notify done");
+            }
+          } catch (e) {
+            logger.error({ err: e }, "Apply leave background submit failed");
+            try {
+              if (viewId) {
+                const client = getSlackClient();
+                await client.views.update({
+                  view_id: viewId,
+                  view: applyLeaveResultView(
+                    false,
+                    e instanceof Error ? e.message : "Could not submit leave. Please try again."
+                  ) as never,
+                });
+              }
+            } catch {
+              /* ignore */
+            }
+          }
+        });
+
+        return NextResponse.json({
+          response_action: "update",
+          view: applyLeaveSubmittingView(),
+        });
+      }
+
+      // --- Other modals (Comp Off, reject, etc.) ---
       const work = processViewSubmissionBackground(payload);
 
       after(async () => {
@@ -103,12 +197,6 @@ export async function POST(req: NextRequest) {
                 { creditId: result.compOffCreditId, notify },
                 "Comp Off submit Slack notify done"
               );
-            } else if (result.requestId) {
-              const notify = await sendLeaveSubmittedNotifications(
-                result.requestId,
-                result.applicantSlackUserId
-              );
-              logger.info({ requestId: result.requestId, notify }, "Leave submit Slack notify done");
             }
           }
         } catch (e) {
@@ -119,7 +207,6 @@ export async function POST(req: NextRequest) {
       try {
         const outcome = await Promise.race([
           work.then((r) => ({ type: "done" as const, r })),
-          // Keep modal open long enough to return field errors (Slack allows ~3s)
           new Promise<{ type: "slow" }>((resolve) =>
             setTimeout(() => resolve({ type: "slow" }), 2500)
           ),
@@ -137,28 +224,6 @@ export async function POST(req: NextRequest) {
               response_action: "errors",
               errors: { reason: outcome.r.message.slice(0, 100) },
             });
-          }
-        }
-
-        // If still slow but work already failed with field errors, wait briefly more
-        if (outcome.type === "slow") {
-          const late = await Promise.race([
-            work.then((r) => r),
-            new Promise<null>((resolve) => setTimeout(() => resolve(null), 400)),
-          ]);
-          if (late && !late.ok) {
-            if (late.fieldErrors) {
-              return NextResponse.json({
-                response_action: "errors",
-                errors: late.fieldErrors,
-              });
-            }
-            if (late.message) {
-              return NextResponse.json({
-                response_action: "errors",
-                errors: { reason: late.message.slice(0, 100) },
-              });
-            }
           }
         }
       } catch (e) {
