@@ -26,6 +26,10 @@ import {
 } from "@/lib/slack/notifications";
 import { getEmployeeBalancesForDisplay } from "@/lib/leave/balances";
 import { MENSTRUATION_LEAVE_CODE } from "@/lib/leave/constants";
+import {
+  quickApplyLeaveFieldErrors,
+  mapLeaveValidationToFieldErrors,
+} from "@/lib/slack/apply-leave-errors";
 import { hashPayload, withIdempotency } from "@/lib/idempotency";
 
 export async function resolveEmployeeBySlackUserId(slackUserId: string) {
@@ -717,27 +721,21 @@ export async function processViewSubmissionBackground(
         LeaveDuration.FULL_DAY;
       const reason = values.reason?.reason_input?.value || "";
 
-      if (!leaveTypeId) {
-        return { ok: false, fieldErrors: { leave_type: "Select a leave type" } };
-      }
-      if (!fromDate || !toDate) {
-        return {
-          ok: false,
-          fieldErrors: {
-            ...(!fromDate ? { from_date: "Required" } : {}),
-            ...(!toDate ? { to_date: "Required" } : {}),
-          },
-        };
-      }
-      if (!reason.trim()) {
-        return { ok: false, fieldErrors: { reason: "Reason is required" } };
+      const early = quickApplyLeaveFieldErrors({
+        leaveTypeId,
+        fromDate,
+        toDate,
+        reason,
+      });
+      if (early) {
+        return { ok: false, fieldErrors: early };
       }
 
-      // Fast client-side style alert for menstruation (>1 calendar day selected)
-      if (leaveTypeId !== "__PAID_POOL__") {
+      // Menstruation: only 1 calendar day
+      if (leaveTypeId && leaveTypeId !== "__PAID_POOL__") {
         const leaveType = await prisma.leaveType.findUnique({
           where: { id: leaveTypeId },
-          include: { policy: true },
+          select: { code: true },
         });
         if (leaveType?.code === MENSTRUATION_LEAVE_CODE && fromDate !== toDate) {
           return {
@@ -753,15 +751,14 @@ export async function processViewSubmissionBackground(
       try {
         const request = await createLeaveRequest({
           employeeId: employee.id,
-          leaveTypeId,
-          startDate: fromDate,
-          endDate: toDate,
+          leaveTypeId: leaveTypeId!,
+          startDate: fromDate!,
+          endDate: toDate!,
           duration,
           reason,
           actorLabel: employee.name,
         });
 
-        // Notifications must run in route after() — never void/fire-and-forget (Vercel kills them)
         return {
           ok: true,
           requestId: request.id,
@@ -769,29 +766,15 @@ export async function processViewSubmissionBackground(
         };
       } catch (e) {
         const msg =
-          e instanceof LeaveValidationError ? e.message : "Could not create leave request.";
-        const lower = msg.toLowerCase();
-        if (lower.includes("past") || lower.includes("10:00") || lower.includes("3 months")) {
-          return {
-            ok: false,
-            fieldErrors: {
-              from_date: msg.slice(0, 100),
-            },
-          };
-        }
-        if (
-          lower.includes("menstruation") ||
-          lower.includes("1 day")
-        ) {
-          return {
-            ok: false,
-            fieldErrors: {
-              to_date: msg.slice(0, 100),
-            },
-          };
-        }
-        await dm(`❌ ${msg}`);
-        return { ok: false, message: msg };
+          e instanceof LeaveValidationError
+            ? e.message
+            : "Could not create leave request. Please try again.";
+        // Always show rule errors on the form (past / 10AM / 3 months / balance / overlap)
+        return {
+          ok: false,
+          fieldErrors: mapLeaveValidationToFieldErrors(msg),
+          message: msg,
+        };
       }
     }
 

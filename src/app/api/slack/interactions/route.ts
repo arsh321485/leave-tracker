@@ -119,8 +119,9 @@ export async function POST(req: NextRequest) {
       try {
         const outcome = await Promise.race([
           work.then((r) => ({ type: "done" as const, r })),
+          // Keep modal open long enough to return field errors (Slack allows ~3s)
           new Promise<{ type: "slow" }>((resolve) =>
-            setTimeout(() => resolve({ type: "slow" }), 1800)
+            setTimeout(() => resolve({ type: "slow" }), 2500)
           ),
         ]);
 
@@ -136,6 +137,28 @@ export async function POST(req: NextRequest) {
               response_action: "errors",
               errors: { reason: outcome.r.message.slice(0, 100) },
             });
+          }
+        }
+
+        // If still slow but work already failed with field errors, wait briefly more
+        if (outcome.type === "slow") {
+          const late = await Promise.race([
+            work.then((r) => r),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 400)),
+          ]);
+          if (late && !late.ok) {
+            if (late.fieldErrors) {
+              return NextResponse.json({
+                response_action: "errors",
+                errors: late.fieldErrors,
+              });
+            }
+            if (late.message) {
+              return NextResponse.json({
+                response_action: "errors",
+                errors: { reason: late.message.slice(0, 100) },
+              });
+            }
           }
         }
       } catch (e) {

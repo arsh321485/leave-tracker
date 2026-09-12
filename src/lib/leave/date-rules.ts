@@ -47,12 +47,15 @@ export function leaveDateWindowError(
   }
 
   if (startKey === today && hour >= 10) {
-    return "Same-day leave can only be applied before 10:00 AM IST.";
+    return "Same-day leave only before 10:00 AM IST. Apply tomorrow or earlier tomorrow morning.";
   }
 
   const maxKey = addMonthsDateKey(today, 3);
-  if (startKey > maxKey || endKey > maxKey) {
-    return `Leave can only be applied up to 3 months ahead (until ${maxKey}).`;
+  if (startKey > maxKey) {
+    return `From date is too far. Leave only allowed until ${maxKey} (3 months).`;
+  }
+  if (endKey > maxKey) {
+    return `To date is too far. Leave only allowed until ${maxKey} (3 months).`;
   }
 
   return null;
