@@ -172,43 +172,76 @@ function buildCompOffCreditView() {
 /**
  * Slack static_select cannot disable options — exhausted types are listed as
  * unavailable (strikethrough) and omitted from the select.
+ * Casual + Annual + Comp Off are shown as one Paid Leave pool.
  */
 async function buildApplyLeaveView(employeeId: string) {
   const balances = await getEmployeeBalancesForDisplay(employeeId);
-  const available = balances.filter((b) => b.remaining > 0);
-  const exhausted = balances.filter((b) => b.remaining <= 0);
+  const pooledCodes = new Set(["COMP_OFF", "CASUAL", "ANNUAL"]);
+  const pooled = balances.filter((b) => pooledCodes.has(b.leaveType.code));
+  const other = balances.filter((b) => !pooledCodes.has(b.leaveType.code));
 
-  if (!balances.length) {
-    return infoModal(
-      "Apply Leave",
-      "No leave types are available for you. Contact HR."
-    );
+  const poolRemaining = pooled.reduce((s, b) => s + Math.max(0, b.remaining), 0);
+  const poolParts = pooled
+    .filter((b) => b.remaining > 0)
+    .map((b) => `${b.leaveType.name} ${b.remaining}`)
+    .join(" · ");
+
+  const options: { text: { type: "plain_text"; text: string }; value: string }[] = [];
+
+  if (poolRemaining > 0) {
+    const label =
+      `Paid Leave (Casual+Annual+Comp Off) · ${poolRemaining} left`.slice(0, 75);
+    options.push({
+      text: { type: "plain_text", text: label },
+      value: "__PAID_POOL__",
+    });
   }
 
-  if (!available.length) {
-    const list = exhausted
-      .map((b) => `~${b.leaveType.name}~ (0 remaining)`)
-      .join("\n");
+  for (const b of other) {
+    if (b.remaining <= 0) continue;
+    const suffix =
+      b.leaveType.code === "MENSTRUATION"
+        ? ` · ${b.remaining} left · 1 day max`
+        : ` · ${b.remaining} left`;
+    options.push({
+      text: {
+        type: "plain_text",
+        text: `${b.leaveType.name}${suffix}`.slice(0, 75),
+      },
+      value: b.leaveType.id,
+    });
+  }
+
+  const exhaustedNames = [
+    ...(poolRemaining <= 0 && pooled.length
+      ? ["Paid Leave (Casual+Annual+Comp Off)"]
+      : []),
+    ...other.filter((b) => b.remaining <= 0).map((b) => b.leaveType.name),
+  ];
+
+  if (!options.length) {
     return infoModal(
       "Apply Leave",
-      `You have *no remaining leave balance* for any type.\n\n${list}`
+      `You have *no remaining leave balance*.\n\n${exhaustedNames
+        .map((n) => `~${n}~`)
+        .join("\n")}`
     );
   }
 
   const unavailableBlock =
-    exhausted.length > 0
+    exhaustedNames.length > 0
       ? {
           type: "section" as const,
           text: {
             type: "mrkdwn" as const,
-            text: `*Unavailable (balance used):*\n${exhausted
-              .map((b) => `~${b.leaveType.name}~`)
-              .join("  ·  ")}`,
+            text: `*Unavailable:*\n${exhaustedNames.map((n) => `~${n}~`).join("  ·  ")}`,
           },
         }
       : null;
 
-  const hasMenstruation = available.some((b) => b.leaveType.code === "MENSTRUATION");
+  const hasMenstruation = options.some((o) =>
+    o.text.text.toLowerCase().includes("menstruation")
+  );
 
   return {
     type: "modal",
@@ -217,6 +250,19 @@ async function buildApplyLeaveView(employeeId: string) {
     submit: { type: "plain_text", text: "Submit" },
     close: { type: "plain_text", text: "Cancel" },
     blocks: [
+      {
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text:
+            (poolRemaining > 0
+              ? `*Paid Leave pool:* ${poolRemaining} day(s) left` +
+                (poolParts ? ` _(${poolParts})_` : "") +
+                "\n"
+              : "") +
+            "_Dates: no past days · same-day only before 10:00 AM IST · max 3 months ahead._",
+        },
+      },
       ...(unavailableBlock ? [unavailableBlock] : []),
       {
         type: "input",
@@ -225,24 +271,14 @@ async function buildApplyLeaveView(employeeId: string) {
         hint: {
           type: "plain_text",
           text: hasMenstruation
-            ? "Menstruation leave: 1 day only (same From & To date)."
-            : "Only leave types with remaining balance are listed.",
+            ? "Menstruation: 1 day only. Paid Leave uses Casual+Annual+Comp Off together."
+            : "Paid Leave combines Casual, Annual & Comp Off so you can take longer leave.",
         },
         element: {
           type: "static_select",
           action_id: "leave_type_select",
           placeholder: { type: "plain_text", text: "Select leave type" },
-          options: available.map((b) => {
-            const suffix =
-              b.leaveType.code === "MENSTRUATION"
-                ? ` · ${b.remaining} left · 1 day max`
-                : ` · ${b.remaining} left`;
-            const label = `${b.leaveType.name}${suffix}`.slice(0, 75);
-            return {
-              text: { type: "plain_text", text: label },
-              value: b.leaveType.id,
-            };
-          }),
+          options,
         },
       },
       {
@@ -465,10 +501,23 @@ export async function handleModalActionFast(payload: BlockPayload): Promise<{
           let text = "";
           if (action.action_id === "my_balance") {
             const balances = await getEmployeeBalancesForDisplay(employee.id);
-            const lines = balances.map((b) => {
-              const suffix = b.monthly ? " (this month)" : "";
-              return `*${b.leaveType.name}*${suffix}\nAllocated: ${b.allocated} | Used: ${b.used} | Pending: ${b.pending} | Remaining: ${b.remaining}`;
-            });
+            const pooled = balances.filter((b) =>
+              ["COMP_OFF", "CASUAL", "ANNUAL"].includes(b.leaveType.code)
+            );
+            const other = balances.filter(
+              (b) => !["COMP_OFF", "CASUAL", "ANNUAL"].includes(b.leaveType.code)
+            );
+            const poolRem = pooled.reduce((s, b) => s + Math.max(0, b.remaining), 0);
+            const poolDetail = pooled
+              .map((b) => `${b.leaveType.name}: ${b.remaining}`)
+              .join(" · ");
+            const lines = [
+              `*Paid Leave pool (Casual + Annual + Comp Off)*\nCombined remaining: *${poolRem}* day(s)\n_${poolDetail || "No balances"}_`,
+              ...other.map((b) => {
+                const suffix = b.monthly ? " (this month)" : "";
+                return `*${b.leaveType.name}*${suffix}\nAllocated: ${b.allocated} | Used: ${b.used} | Pending: ${b.pending} | Remaining: ${b.remaining}`;
+              }),
+            ];
             text = `🏖️ *MY LEAVE BALANCE*\n\n${lines.join("\n\n") || "No balances found."}`;
           } else if (action.action_id === "my_history") {
             const history = await prisma.leaveRequest.findMany({
@@ -685,18 +734,20 @@ export async function processViewSubmissionBackground(
       }
 
       // Fast client-side style alert for menstruation (>1 calendar day selected)
-      const leaveType = await prisma.leaveType.findUnique({
-        where: { id: leaveTypeId },
-        include: { policy: true },
-      });
-      if (leaveType?.code === MENSTRUATION_LEAVE_CODE && fromDate !== toDate) {
-        return {
-          ok: false,
-          fieldErrors: {
-            to_date:
-              "Menstruation leave allows only 1 day. Set From and To to the same date.",
-          },
-        };
+      if (leaveTypeId !== "__PAID_POOL__") {
+        const leaveType = await prisma.leaveType.findUnique({
+          where: { id: leaveTypeId },
+          include: { policy: true },
+        });
+        if (leaveType?.code === MENSTRUATION_LEAVE_CODE && fromDate !== toDate) {
+          return {
+            ok: false,
+            fieldErrors: {
+              to_date:
+                "Menstruation leave allows only 1 day. Set From and To to the same date.",
+            },
+          };
+        }
       }
 
       try {
@@ -720,8 +771,15 @@ export async function processViewSubmissionBackground(
         const msg =
           e instanceof LeaveValidationError ? e.message : "Could not create leave request.";
         const lower = msg.toLowerCase();
+        if (lower.includes("past") || lower.includes("10:00") || lower.includes("3 months")) {
+          return {
+            ok: false,
+            fieldErrors: {
+              from_date: msg.slice(0, 100),
+            },
+          };
+        }
         if (
-          leaveType?.code === MENSTRUATION_LEAVE_CODE ||
           lower.includes("menstruation") ||
           lower.includes("1 day")
         ) {

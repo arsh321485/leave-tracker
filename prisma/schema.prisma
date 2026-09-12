@@ -207,6 +207,8 @@ model LeaveRequest {
   duration        LeaveDuration      @default(FULL_DAY)
   days            Float
   reason          String
+  /** When Paid Leave pool is used: [{ leaveTypeId, days }] across Comp Off / Casual / Annual */
+  balanceSplit    Json?
   status          LeaveRequestStatus @default(PENDING)
   approvedById    String?
   approvedBy      Employee?          @relation("LeaveApprover", fields: [approvedById], references: [id])

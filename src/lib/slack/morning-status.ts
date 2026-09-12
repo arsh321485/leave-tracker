@@ -247,6 +247,30 @@ export async function sendMorningStatusDigestIfScheduled() {
   const { dateKey, weekday, hour } = getISTHourAndDate();
   const targetHour = await getMorningStatusHourIst();
 
+  if (weekday === "Saturday" || weekday === "Sunday") {
+    return {
+      ok: true,
+      skipped: true,
+      reason: `Weekend (${weekday}) — team status not sent`,
+    };
+  }
+
+  const { dayStart, dayEnd } = getISTDayBounds(dateKey);
+  const holidayToday = await prisma.holiday.findFirst({
+    where: {
+      status: "ACTIVE",
+      isOptional: false,
+      date: { gte: dayStart, lte: dayEnd },
+    },
+  });
+  if (holidayToday) {
+    return {
+      ok: true,
+      skipped: true,
+      reason: `Holiday (${holidayToday.name}) — team status not sent`,
+    };
+  }
+
   // Soft window: allow configured hour ±1 in case of cron delay
   const inWindow =
     hour === targetHour || hour === (targetHour + 1) % 24 || hour === (targetHour + 23) % 24;

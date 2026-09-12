@@ -6,6 +6,7 @@ import { getSlackClient, postSlackMessage, slackErrorCode } from "@/lib/slack/cl
 import { managerApprovalBlocks, managerCompOffApprovalBlocks } from "@/lib/slack/blocks";
 import { logger } from "@/lib/logger";
 import { isPublicSlackChannel, normalizeSlackId } from "@/lib/slack/ids";
+import { formatPaidLeaveLabel, parseBalanceSplit } from "@/lib/leave/pool";
 
 export type NotifyResult =
   | { ok: true; via?: "dm" | "ephemeral" }
@@ -88,10 +89,15 @@ export async function notifyManagerOfLeave(requestId: string): Promise<NotifyRes
     },
   });
 
+  const split = parseBalanceSplit(request.balanceSplit);
+  const leaveTypeLabel = split?.length
+    ? formatPaidLeaveLabel(split)
+    : request.leaveType.name;
+
   const blocks = managerApprovalBlocks({
     requestId: request.id,
     employeeName: request.employee.name,
-    leaveType: request.leaveType.name,
+    leaveType: leaveTypeLabel,
     dateRange: formatDateRange(request.startDate, request.endDate),
     days: request.days,
     reason: request.reason,

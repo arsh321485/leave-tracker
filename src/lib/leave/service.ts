@@ -9,6 +9,17 @@ import { prisma } from "@/lib/prisma";
 import { writeAuditLog } from "@/lib/audit";
 import { calculateLeaveDays } from "@/lib/leave/working-days";
 import { remainingBalance } from "@/lib/utils";
+import { leaveDateWindowError } from "@/lib/leave/date-rules";
+import {
+  PAID_POOL_SELECT_VALUE,
+  isPooledLeaveCode,
+} from "@/lib/leave/constants";
+import {
+  allocatePooledLeaveDays,
+  formatPaidLeaveLabel,
+  parseBalanceSplit,
+  type BalanceSplitPart,
+} from "@/lib/leave/pool";
 
 export class LeaveValidationError extends Error {
   constructor(message: string) {
@@ -24,6 +35,87 @@ function datesOverlap(
   bEnd: Date
 ): boolean {
   return aStart <= bEnd && bStart <= aEnd;
+}
+
+async function applyPendingSplit(
+  tx: Prisma.TransactionClient,
+  employeeId: string,
+  year: number,
+  split: BalanceSplitPart[],
+  direction: "increment" | "decrement"
+) {
+  for (const part of split) {
+    const bal = await tx.leaveBalance.findUnique({
+      where: {
+        employeeId_leaveTypeId_year: {
+          employeeId,
+          leaveTypeId: part.leaveTypeId,
+          year,
+        },
+      },
+    });
+    if (!bal) {
+      if (direction === "decrement") continue;
+      await tx.leaveBalance.create({
+        data: {
+          employeeId,
+          leaveTypeId: part.leaveTypeId,
+          year,
+          allocated: 0,
+          used: 0,
+          pending: part.days,
+          carryForward: 0,
+        },
+      });
+      continue;
+    }
+    if (direction === "increment") {
+      await tx.leaveBalance.update({
+        where: { id: bal.id },
+        data: { pending: { increment: part.days } },
+      });
+    } else {
+      await tx.leaveBalance.update({
+        where: { id: bal.id },
+        data: { pending: Math.max(0, bal.pending - part.days) },
+      });
+    }
+  }
+}
+
+async function applyUsedFromSplit(
+  tx: Prisma.TransactionClient,
+  employeeId: string,
+  year: number,
+  split: BalanceSplitPart[],
+  mode: "approve" | "unapprove"
+) {
+  for (const part of split) {
+    const bal = await tx.leaveBalance.findUnique({
+      where: {
+        employeeId_leaveTypeId_year: {
+          employeeId,
+          leaveTypeId: part.leaveTypeId,
+          year,
+        },
+      },
+    });
+    if (!bal) continue;
+    if (mode === "approve") {
+      await tx.leaveBalance.update({
+        where: { id: bal.id },
+        data: {
+          pending: Math.max(0, bal.pending - part.days),
+          used: { increment: part.days },
+        },
+      });
+    } else {
+      await tx.leaveBalance.update({
+        where: { id: bal.id },
+        data: { used: Math.max(0, bal.used - part.days) },
+      });
+    }
+  }
 }
 
 export async function validateLeaveRequest(input: {
@@ -47,20 +139,23 @@ export async function validateLeaveRequest(input: {
     throw new LeaveValidationError("Employee does not have a valid manager assigned.");
   }
 
-  const leaveType = await prisma.leaveType.findUnique({
-    where: { id: input.leaveTypeId },
-    include: { policy: true },
-  });
-  if (!leaveType || !leaveType.isActive) {
-    throw new LeaveValidationError("Leave type does not exist or is inactive.");
-  }
-
   if (!input.startDate || !input.endDate) {
     throw new LeaveValidationError("Start date and end date are required.");
   }
 
-  const start = new Date(input.startDate);
-  const end = new Date(input.endDate);
+  const dateErr = leaveDateWindowError(input.startDate, input.endDate);
+  if (dateErr) throw new LeaveValidationError(dateErr);
+
+  const start = new Date(
+    typeof input.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input.startDate)
+      ? `${input.startDate}T00:00:00.000Z`
+      : input.startDate
+  );
+  const end = new Date(
+    typeof input.endDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input.endDate)
+      ? `${input.endDate}T00:00:00.000Z`
+      : input.endDate
+  );
   if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
     throw new LeaveValidationError("Invalid start or end date.");
   }
@@ -68,7 +163,6 @@ export async function validateLeaveRequest(input: {
     throw new LeaveValidationError("Start date must be on or before end date.");
   }
 
-  // Half / full day is a duration option on every leave type (not a separate type).
   if (input.duration === LeaveDuration.HALF_DAY) {
     if (start.toISOString().slice(0, 10) !== end.toISOString().slice(0, 10)) {
       throw new LeaveValidationError("Half-day leave must be for a single day.");
@@ -86,8 +180,23 @@ export async function validateLeaveRequest(input: {
     );
   }
 
+  const isPaidPool = input.leaveTypeId === PAID_POOL_SELECT_VALUE;
+  let leaveType = isPaidPool
+    ? null
+    : await prisma.leaveType.findUnique({
+        where: { id: input.leaveTypeId },
+        include: { policy: true },
+      });
+
+  if (!isPaidPool && (!leaveType || !leaveType.isActive)) {
+    throw new LeaveValidationError("Leave type does not exist or is inactive.");
+  }
+
+  const usePool = isPaidPool || (leaveType != null && isPooledLeaveCode(leaveType.code));
+
   if (
-    leaveType.policy?.maxConsecutiveDays &&
+    leaveType?.policy?.maxConsecutiveDays &&
+    !usePool &&
     days > leaveType.policy.maxConsecutiveDays
   ) {
     throw new LeaveValidationError(
@@ -95,7 +204,7 @@ export async function validateLeaveRequest(input: {
     );
   }
 
-  if (leaveType.policy?.requiresEligibility) {
+  if (leaveType?.policy?.requiresEligibility) {
     const eligible = await prisma.employeeLeaveEligibility.findUnique({
       where: {
         employeeId_leaveTypeId: {
@@ -109,7 +218,7 @@ export async function validateLeaveRequest(input: {
     }
   }
 
-  if (leaveType.policy?.monthlyQuota != null) {
+  if (leaveType?.policy?.monthlyQuota != null) {
     if (days > leaveType.policy.monthlyQuota) {
       const isMenstruation = leaveType.code === "MENSTRUATION";
       throw new LeaveValidationError(
@@ -139,9 +248,10 @@ export async function validateLeaveRequest(input: {
       employee,
       leaveType,
       days,
-      balance: null,
+      balance: null as null,
       year: start.getUTCFullYear(),
-      monthly: true,
+      monthly: true as const,
+      balanceSplit: null as BalanceSplitPart[] | null,
     };
   }
 
@@ -162,22 +272,61 @@ export async function validateLeaveRequest(input: {
   }
 
   const year = start.getUTCFullYear();
+
+  if (usePool) {
+    const preferredCode = leaveType?.code ?? null;
+    const { split, poolRemaining } = await allocatePooledLeaveDays({
+      employeeId: input.employeeId,
+      days,
+      year,
+      preferredCode,
+    });
+    if (days > poolRemaining) {
+      throw new LeaveValidationError(
+        `You have only ${poolRemaining} day(s) in Paid Leave (Casual + Annual + Comp Off), but you requested ${days} days.`
+      );
+    }
+    if (!split.length) {
+      throw new LeaveValidationError(
+        "No Paid Leave balance available (Casual + Annual + Comp Off)."
+      );
+    }
+
+    const primaryType = await prisma.leaveType.findUnique({
+      where: { id: split[0].leaveTypeId },
+      include: { policy: true },
+    });
+    if (!primaryType) {
+      throw new LeaveValidationError("Paid Leave types are not configured.");
+    }
+
+    return {
+      employee,
+      leaveType: primaryType,
+      days,
+      balance: null as null,
+      year,
+      monthly: false as const,
+      balanceSplit: split,
+    };
+  }
+
   let balance = await prisma.leaveBalance.findUnique({
     where: {
       employeeId_leaveTypeId_year: {
         employeeId: input.employeeId,
-        leaveTypeId: input.leaveTypeId,
+        leaveTypeId: leaveType!.id,
         year,
       },
     },
   });
 
   if (!balance) {
-    const allocated = leaveType.policy?.annualAllocation ?? 0;
+    const allocated = leaveType!.policy?.annualAllocation ?? 0;
     balance = await prisma.leaveBalance.create({
       data: {
         employeeId: input.employeeId,
-        leaveTypeId: input.leaveTypeId,
+        leaveTypeId: leaveType!.id,
         year,
         allocated,
         used: 0,
@@ -190,11 +339,19 @@ export async function validateLeaveRequest(input: {
   const remaining = remainingBalance(balance);
   if (days > remaining) {
     throw new LeaveValidationError(
-      `You have only ${remaining} ${leaveType.name} days available, but you requested ${days} days.`
+      `You have only ${remaining} ${leaveType!.name} days available, but you requested ${days} days.`
     );
   }
 
-  return { employee, leaveType, days, balance, year, monthly: false };
+  return {
+    employee,
+    leaveType: leaveType!,
+    days,
+    balance,
+    year,
+    monthly: false as const,
+    balanceSplit: null as BalanceSplitPart[] | null,
+  };
 }
 
 export async function createLeaveRequest(input: {
@@ -213,13 +370,24 @@ export async function createLeaveRequest(input: {
     const created = await tx.leaveRequest.create({
       data: {
         employeeId: input.employeeId,
-        leaveTypeId: input.leaveTypeId,
-        startDate: new Date(input.startDate),
-        endDate: new Date(input.endDate),
+        leaveTypeId: validated.leaveType!.id,
+        startDate: new Date(
+          typeof input.startDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input.startDate)
+            ? `${input.startDate}T00:00:00.000Z`
+            : input.startDate
+        ),
+        endDate: new Date(
+          typeof input.endDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(input.endDate)
+            ? `${input.endDate}T00:00:00.000Z`
+            : input.endDate
+        ),
         duration: input.duration,
         days: validated.days,
         reason: input.reason.trim(),
         status: LeaveRequestStatus.PENDING,
+        balanceSplit: validated.balanceSplit
+          ? (validated.balanceSplit as unknown as Prisma.InputJsonValue)
+          : Prisma.JsonNull,
       },
       include: {
         employee: { include: { manager: true } },
@@ -227,7 +395,28 @@ export async function createLeaveRequest(input: {
       },
     });
 
-    if (validated.balance) {
+    if (validated.balanceSplit?.length) {
+      await applyPendingSplit(
+        tx,
+        input.employeeId,
+        validated.year,
+        validated.balanceSplit,
+        "increment"
+      );
+      await writeAuditLog(
+        {
+          actorId: input.actorId,
+          actorLabel: input.actorLabel,
+          action: AuditAction.BALANCE_UPDATED,
+          objectType: "LeaveBalance",
+          metadata: {
+            pendingSplit: validated.balanceSplit,
+            label: formatPaidLeaveLabel(validated.balanceSplit),
+          },
+        },
+        tx
+      );
+    } else if (validated.balance) {
       await tx.leaveBalance.update({
         where: { id: validated.balance.id },
         data: { pending: { increment: validated.days } },
@@ -257,6 +446,7 @@ export async function createLeaveRequest(input: {
           status: created.status,
           days: created.days,
           leaveTypeId: created.leaveTypeId,
+          balanceSplit: validated.balanceSplit,
         },
       },
       tx
@@ -300,9 +490,10 @@ export async function approveLeaveRequest(input: {
       include: { policy: true },
     });
     const isMonthly = leaveTypeWithPolicy?.policy?.monthlyQuota != null;
+    const split = parseBalanceSplit(request.balanceSplit);
 
     const year = request.startDate.getUTCFullYear();
-    let balance = isMonthly
+    let balance = isMonthly || split
       ? null
       : await tx.leaveBalance.findUnique({
           where: {
@@ -314,7 +505,7 @@ export async function approveLeaveRequest(input: {
           },
         });
 
-    if (!isMonthly && !balance) {
+    if (!isMonthly && !split && !balance) {
       balance = await tx.leaveBalance.create({
         data: {
           employeeId: request.employeeId,
@@ -342,7 +533,9 @@ export async function approveLeaveRequest(input: {
       },
     });
 
-    if (balance) {
+    if (split?.length) {
+      await applyUsedFromSplit(tx, request.employeeId, year, split, "approve");
+    } else if (balance) {
       const newPending = Math.max(0, balance.pending - request.days);
       await tx.leaveBalance.update({
         where: { id: balance.id },
@@ -400,15 +593,18 @@ export async function rejectLeaveRequest(input: {
     }
 
     const year = request.startDate.getUTCFullYear();
-    const balance = await tx.leaveBalance.findUnique({
-      where: {
-        employeeId_leaveTypeId_year: {
-          employeeId: request.employeeId,
-          leaveTypeId: request.leaveTypeId,
-          year,
-        },
-      },
-    });
+    const split = parseBalanceSplit(request.balanceSplit);
+    const balance = split
+      ? null
+      : await tx.leaveBalance.findUnique({
+          where: {
+            employeeId_leaveTypeId_year: {
+              employeeId: request.employeeId,
+              leaveTypeId: request.leaveTypeId,
+              year,
+            },
+          },
+        });
 
     const updated = await tx.leaveRequest.update({
       where: { id: request.id },
@@ -425,7 +621,9 @@ export async function rejectLeaveRequest(input: {
       },
     });
 
-    if (balance) {
+    if (split?.length) {
+      await applyPendingSplit(tx, request.employeeId, year, split, "decrement");
+    } else if (balance) {
       await tx.leaveBalance.update({
         where: { id: balance.id },
         data: { pending: { decrement: request.days } },
@@ -479,15 +677,18 @@ export async function cancelLeaveRequest(input: {
     }
 
     const year = request.startDate.getUTCFullYear();
-    const balance = await tx.leaveBalance.findUnique({
-      where: {
-        employeeId_leaveTypeId_year: {
-          employeeId: request.employeeId,
-          leaveTypeId: request.leaveTypeId,
-          year,
-        },
-      },
-    });
+    const split = parseBalanceSplit(request.balanceSplit);
+    const balance = split
+      ? null
+      : await tx.leaveBalance.findUnique({
+          where: {
+            employeeId_leaveTypeId_year: {
+              employeeId: request.employeeId,
+              leaveTypeId: request.leaveTypeId,
+              year,
+            },
+          },
+        });
 
     const updated = await tx.leaveRequest.update({
       where: { id: request.id },
@@ -495,7 +696,13 @@ export async function cancelLeaveRequest(input: {
       include: { employee: true, leaveType: true },
     });
 
-    if (balance) {
+    if (split?.length) {
+      if (request.status === LeaveRequestStatus.PENDING) {
+        await applyPendingSplit(tx, request.employeeId, year, split, "decrement");
+      } else if (request.status === LeaveRequestStatus.APPROVED) {
+        await applyUsedFromSplit(tx, request.employeeId, year, split, "unapprove");
+      }
+    } else if (balance) {
       if (request.status === LeaveRequestStatus.PENDING) {
         await tx.leaveBalance.update({
           where: { id: balance.id },
